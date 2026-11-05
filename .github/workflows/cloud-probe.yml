@@ -1,0 +1,24 @@
+name: Verify Dell from cloud
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - run: python3 -m pip install -r requirements-probe.txt
+      - name: Test protected terminal with temporary project credential
+        env:
+          DELL_PROBE_CREDENTIALS: ${{ secrets.DELL_PROBE_CREDENTIALS }}
+        run: |
+          test -n "$DELL_PROBE_CREDENTIALS"
+          umask 077
+          printf '%s' "$DELL_PROBE_CREDENTIALS" > "$RUNNER_TEMP/dell-probe.json"
+          trap 'rm -f "$RUNNER_TEMP/dell-probe.json"' EXIT
+          python3 -B cloudflare/check_external.py --credentials "$RUNNER_TEMP/dell-probe.json"
