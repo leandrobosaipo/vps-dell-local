@@ -1,0 +1,16 @@
+private/
+receipts/
+reports/
+backups/
+downloads/
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*_ed25519
+*.zip
+*.gpg
+*.age
+__pycache__/
+.DS_Store

@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "zone": "codigo5.com.br",
+  "hostname": "painel-dell.codigo5.com.br",
+  "tunnelName": "vps-dell-local",
+  "applicationName": "VPS Dell local",
+  "serviceTokenName": "VPS Dell local - Dot",
+  "serviceTokenDuration": "2160h",
+  "origin": "http://127.0.0.1:9090"
+}
