@@ -78,11 +78,19 @@ banco separado no mesmo PostgreSQL. Não confundir com DR em outra máquina,
 backup externo completo ou migração de dados reais.
 
 As credenciais novas ficam no diretório `private/` do convidado (0600), sem
-valores neste repositório. O workflow n8n é manual/inativo. Antes de criar
-agendamentos, definir e validar `America/Cuiaba`; o fuso da instância ainda não
-foi configurado nessa prova. Modelos/API paga, canais reais e dados da JP não
-foram conectados. Os recibos locais do piloto ficam em
+valores neste repositório. Na prova inicial havia somente um workflow
+manual/inativo. Depois do reboot autorizado do Windows, a revisão
+`95d9df3f0d4513a4ee394e3696c7f281f4f832fc` configurou `America/Cuiaba` na
+instância e em um novo webhook sintético autenticado. Veja o
+[runbook dos fluxos](https://github.com/leandrobosaipo/jp-atendimento-piloto/blob/95d9df3f0d4513a4ee394e3696c7f281f4f832fc/flows/README.md)
+e a [CI dessa revisão](https://github.com/leandrobosaipo/jp-atendimento-piloto/actions/runs/42212188277).
+Sete eventos fictícios geraram sete notas privadas, com duplicata, conflito e
+saída incerta retidos sem nova nota indevida após restart do clock. Sem
+credencial, a requisição recebeu 403 e não gravou evento. Langflow executou
+somente um grafo nativo sem provedor. Modelos/API paga, canais reais e dados
+da JP não foram conectados. Os recibos locais da base do piloto ficam em
 `/Users/leandrobosaipo/Projetos/jp-atendimento-piloto/private/evidence-08f20ae/`.
+Os novos fluxos têm recibo próprio em `private/flows-95d9df3/` nesse projeto.
 
 Não há autorização de canais reais, migração ou ativação da operação JP por
 consequência desta preparação. O NO_GO do pacote de migração continua valendo
