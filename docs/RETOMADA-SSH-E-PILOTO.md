@@ -39,8 +39,45 @@ zero e fechamento da tampa sem suspender.
 O piloto tem seu próprio [repositório](https://github.com/leandrobosaipo/jp-atendimento-piloto)
 e pasta `/Users/leandrobosaipo/Projetos/jp-atendimento-piloto`. Este projeto guarda
 a infraestrutura e o acesso ao Dell; as aplicações e fixtures ficam no piloto.
-As aplicações terão somente dados fictícios, rede interna, limites e portas de
-loopback. A fonte e os checks do SHA exato precedem qualquer instalação no Dell.
+As aplicações usam somente dados fictícios, rede interna, limites e interfaces de
+loopback. A fonte e os checks do SHA exato precederam a instalação no Dell.
+
+## Pilha instalada e recuperação comprovada
+
+Release ativa do piloto: `6143d783e8ccb6662965fbef6c06618286637b2a`, com
+[CI 42208170971](https://github.com/leandrobosaipo/jp-atendimento-piloto/actions/runs/42208170971)
+aprovado. Diretório no convidado: `/opt/atendimento-piloto/source`.
+
+Chatwoot CE/web, Sidekiq, Langflow, n8n, PostgreSQL e Redis estão em execução.
+Os seis containers estão somente na bridge interna, sem rota padrão. Três
+sockets systemd em 127.0.0.1 dão acesso às interfaces sem conceder saída externa
+aos containers. O launcher resolve novamente o IP interno nas ativações e
+abandona privilégios antes do encaminhamento. Não foram abertas portas de
+roteador nem publicados esses painéis na Internet.
+
+O limite inicial de 1,25 GiB do Langflow causou pressão de memória e demora de
+prontidão após o primeiro boot de teste. A atualização dirigida para 1,5 GiB
+preservou o volume, os outros cinco containers e todos os registros fictícios.
+Os limites somados do Compose passaram a 4,375 GiB.
+
+Um novo reboot somente do Linux validou a configuração final: Docker, Cockpit,
+túnel, seis containers e três sockets voltaram, com HTTP 200 nas três interfaces.
+O worker registrou heartbeat; não houve OOM ou restart por falha na amostra.
+Após esse boot havia aproximadamente 3,12 GB decimais de RAM disponível e
+7,76 GB decimais livres em disco. Langflow consumia 1,344/1,5 GiB na amostra;
+isso não é benchmark de carga ou garantia para qualquer fluxo.
+
+Contato Chatwoot, fluxo Langflow e workflow n8n fictícios permaneceram presentes
+após os reinícios. Cada registro também foi conferido em uma restauração em
+banco separado no mesmo PostgreSQL. Não confundir com DR em outra máquina,
+backup externo completo ou migração de dados reais.
+
+As credenciais novas ficam no diretório `private/` do convidado (0600), sem
+valores neste repositório. O workflow n8n é manual/inativo. Antes de criar
+agendamentos, definir e validar `America/Cuiaba`; o fuso da instância ainda não
+foi configurado nessa prova. Modelos/API paga, canais reais e dados da JP não
+foram conectados. Os recibos locais do piloto ficam em
+`/Users/leandrobosaipo/Projetos/jp-atendimento-piloto/private/evidence-08f20ae/`.
 
 Não há autorização de canais reais, migração ou ativação da operação JP por
 consequência desta preparação. O NO_GO do pacote de migração continua valendo
