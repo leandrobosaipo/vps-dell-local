@@ -40,3 +40,4 @@ jobs:
             [Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tokens,[ref]$errors)|Out-Null
             if($errors.Count){throw ($errors.Message -join '; ')}
           }
+          & ./host/Test-LabAccessFilter.ps1

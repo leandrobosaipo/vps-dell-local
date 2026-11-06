@@ -11,6 +11,9 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
+function Test-LabSubnetFilter([string[]]$Addresses) {
+    return @($Addresses).Count -eq 1 -and $Addresses[0] -in @('192.168.100.0/24','192.168.100.0/255.255.255.0')
+}
 $principal=New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if(!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Abra o PowerShell como administrador.'}
 if($env:COMPUTERNAME -ne $ExpectedComputerName){throw 'Computador diferente do laboratorio esperado.'}
@@ -73,7 +76,7 @@ if($LASTEXITCODE -ne 0){throw 'Falha ao aplicar plano de energia. Consulte o bac
 $currentVM=Get-VM -Id $VMId
 $currentSSH=Get-Service sshd
 $remote=@(Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' | Get-NetFirewallAddressFilter | Select-Object -ExpandProperty RemoteAddress)
-if([string]$currentSSH.Status -ne 'Running' -or [string]$currentSSH.StartType -ne 'Automatic' -or $remote.Count -ne 1 -or $remote[0] -ne $network -or [string]$currentVM.State -ne 'Running' -or [string]$currentVM.AutomaticStartAction -ne 'Start' -or $currentVM.AutomaticStartDelay -ne 30){throw 'Readback incompleto. Preserve o backup e envie a saida.'}
+if([string]$currentSSH.Status -ne 'Running' -or [string]$currentSSH.StartType -ne 'Automatic' -or !(Test-LabSubnetFilter $remote) -or [string]$currentVM.State -ne 'Running' -or [string]$currentVM.AutomaticStartAction -ne 'Start' -or $currentVM.AutomaticStartDelay -ne 30){throw 'Readback incompleto. Preserve o backup e envie a saida.'}
 $result=[ordered]@{mode='configured';computer=$env:COMPUTERNAME;ipv4=@($addresses | Select-Object -ExpandProperty IPAddress);
     ssh='Running';sshStartup='Automatic';allowedNetwork=$network;labKeyExpiry='none';
     vm=[string]$currentVM.Name;vmState=[string]$currentVM.State;vmStartup='Start';vmDelaySeconds=30;
