@@ -16,6 +16,7 @@ jobs:
       - name: Static validation and scoped API refusal tests
         run: |
           python3 -B -m unittest discover -s cloudflare -p 'test_*.py'
+          node --test migration/test_*.mjs
           python3 -m json.tool config/public-access.json >/dev/null
           for file in guest/*.sh; do bash -n "$file"; done
           if ! command -v shellcheck >/dev/null; then
