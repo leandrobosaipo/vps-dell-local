@@ -1,5 +1,10 @@
 # Retomada SSH e capacidade do piloto — 06/11/2026
 
+**Atualização posterior:** o usuário autorizou o reboot completo do Windows e
+o retorno sem interação manual foi comprovado. Veja o
+[registro dessa janela](2026-11-06-reboot-windows-validado.md). Os parágrafos
+abaixo sobre boot do host pendente descrevem a preparação anterior à janela.
+
 O login Windows por chave foi comprovado com a identidade de servidor fixada.
 O erro final da primeira recuperação era uma comparação textual: o firewall
 normaliza `192.168.100.0/24` como `192.168.100.0/255.255.255.0`. A fonte passou
