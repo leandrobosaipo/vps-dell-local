@@ -41,3 +41,4 @@ jobs:
             if($errors.Count){throw ($errors.Message -join '; ')}
           }
           & ./host/Test-LabAccessFilter.ps1
+          & ./host/Test-CapacityBudget.ps1

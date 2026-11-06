@@ -19,7 +19,7 @@ if($drives.Count -ne 1){throw 'Unexpected disk count.'}
 $vhd=Get-VHD -Path $drives[0].Path
 if($vhd.Size -gt 20GB){throw 'Disk ceiling differs from the recorded lab.'}
 $free=[long]$os.FreePhysicalMemory*1024
-$extra=[math]::Max(0,$target-$vm.MemoryStartup)
+$extra=[math]::Max([long]0,[long]($target-$vm.MemoryStartup))
 if($free-$extra -lt 3GB){throw 'Preserve at least 3 GiB host free RAM after the increase.'}
 if([long]$disk.FreeSpace-($vhd.Size-$vhd.FileSize)-4GB -lt 25GB){throw 'Windows disk growth/reserve budget failed.'}
 $record=[ordered]@{vmId=$VMId.ToString();previousMemory=$vm.MemoryStartup;previousProcessors=$vm.ProcessorCount;
