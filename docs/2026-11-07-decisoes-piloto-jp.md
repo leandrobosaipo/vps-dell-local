@@ -39,6 +39,11 @@ Este repositório mantém somente o contexto necessário à infraestrutura Dell.
   projeto (opção A), identificado na documentação privada. Nenhuma alteração
   de sessão ou credencial é executada por este registro.
 
+- Foi aprovado começar com teto de **US$ 10/mês** e alertas em **US$ 5 e US$ 8**.
+  Configuração e testes continuam pendentes; nenhum limite real é alterado
+  por esta publicação. Revisão após as primeiras 100 conversas foi proposta,
+  sem alteração automática do teto ou confirmação adicional dessa revisão.
+
 ## Estado e separação dos projetos
 
 A atualização é somente documental. Não muda serviços, redes, webhooks,
