@@ -30,6 +30,11 @@ Este repositório mantém somente o contexto necessário à infraestrutura Dell.
 - O lançamento escolhido é abrir para todos somente após os testes técnicos
   e a revisão final. Não ativar o atendimento real nesta etapa.
 
+- O prazo desejado de retenção do histórico das conversas é **1 ano** (opção B),
+  sujeito a revisão conforme necessidades da JP e regras de proteção de dados.
+  Ainda não foi implementado nem testado. Este registro não altera retenção,
+  ativa limpeza automática ou apaga dados.
+
 ## Estado e separação dos projetos
 
 A atualização é somente documental. Não muda serviços, redes, webhooks,
