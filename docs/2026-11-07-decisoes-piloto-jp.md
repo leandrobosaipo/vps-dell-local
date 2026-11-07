@@ -35,6 +35,10 @@ Este repositório mantém somente o contexto necessário à infraestrutura Dell.
   Ainda não foi implementado nem testado. Este registro não altera retenção,
   ativa limpeza automática ou apaga dados.
 
+- Se a conexão AppBarber expirar, a reativação caberá ao proprietário do
+  projeto (opção A), identificado na documentação privada. Nenhuma alteração
+  de sessão ou credencial é executada por este registro.
+
 ## Estado e separação dos projetos
 
 A atualização é somente documental. Não muda serviços, redes, webhooks,
