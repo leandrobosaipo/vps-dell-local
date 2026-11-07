@@ -1,5 +1,7 @@
 # VPS Dell local
 
+[Decisões do piloto JP de 07/11/2026](docs/2026-11-07-decisoes-piloto-jp.md): Evolution permanece no Mac Mini; decisões funcionais e homologação ficam no projeto do piloto. A publicação documental não libera o corte de produção.
+
 Configuração de acesso e operação do servidor local Dell, preservando o Windows e usando Ubuntu 24.04 em Hyper-V.
 
 Endereço: **https://painel-dell.codigo5.com.br**. Cockpit 314-1 e cloudflared 2026.10.7 estão ativos/habilitados no Dell. O acesso foi verificado por HTTPS e pelo terminal WebSocket, também a partir de um runner em nuvem: [prova 42126914051](https://github.com/leandrobosaipo/vps-dell-local/actions/runs/42126914051).

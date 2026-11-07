@@ -35,6 +35,10 @@ restricted permissions. Do not upload them to CI or a public repository. Public
 CI runs fictional tests only. A snapshot hash is integrity evidence, not proof of
 service-wide consistency, backup coverage or target-service compatibility.
 
+## Confirmed scope on 2026-11-07
+
+Evolution API and its authenticated WhatsApp session must remain on the Mac Mini Server. Do not move or recreate the session as part of the Dell pilot. The user approved only the sampled suggested-question answers, not WhatsApp rendering/delivery, integrated scheduling or image delivery. Approved goals now include prices from the corresponding approved image when AppBarber disagrees, multiple formatted WhatsApp messages, automatic booking/change/cancellation and varied approved images. These goals are not evidence of implemented or tested capabilities. See the [infrastructure decision record](../docs/2026-11-07-decisoes-piloto-jp.md) and the linked pilot acceptance record. Preparation remains NO_GO; this documentation update does not activate a channel or change an appointment.
+
 ## Cutover contract to implement after a proven target pilot
 
 1. Capture fresh runtime identities and versions. Approve one exact release and
