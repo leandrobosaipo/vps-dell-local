@@ -53,8 +53,9 @@ function line(child, prefix) {
   });
 }
 
-async function childFence(port, modulePath, timeoutMs) {
-  const source = `const fence=${fenceApiListener.toString()};fence(${port},${JSON.stringify({modulePath, timeoutMs})}).then(value=>console.log(JSON.stringify(value))).catch(error=>{console.log(JSON.stringify({error:error.message}));process.exitCode=1})`;
+async function childFence(port, modulePath, timeoutMs, receipt) {
+  const options = JSON.stringify({modulePath, timeoutMs}).slice(0,-1) + (receipt ? `,onDrained:value=>{require('node:fs').writeFileSync(${JSON.stringify(receipt)},JSON.stringify(value),{flag:'wx',mode:0o600})}}` : '}');
+  const source = `const fence=${fenceApiListener.toString()};fence(${port},${options}).then(value=>console.log(JSON.stringify(value))).catch(error=>{console.log(JSON.stringify({error:error.message}));process.exitCode=1})`;
   const child = spawn(process.execPath, ['-e', source], {stdio: ['ignore', 'pipe', 'pipe']});
   let output = '';
   child.stdout.on('data', chunk => { output += chunk; });
@@ -83,7 +84,8 @@ test('native close fences new admissions and waits for an in-flight HTTP request
     }).on('error', reject);
   });
   await started;
-  const fenced = childFence(port, modulePath, 15000);
+  const receipt = path.join(path.dirname(modulePath), 'drained.json');
+  const fenced = childFence(port, modulePath, 15000, receipt);
   let refusedBeforeDrain = false;
   const until = Date.now() + 10000;
   while (Date.now() < until && !holdDone) {
@@ -102,6 +104,10 @@ test('native close fences new admissions and waits for an in-flight HTTP request
   assert.equal(result.output.finalCounters.activeMutationRequests, 0, proof); // fresh handler scope after the held request
   assert.equal(result.output.finalConnections, 0, proof);
   assert.equal(result.output.drained, true, proof);
+  const saved = JSON.parse(fs.readFileSync(receipt));
+  assert.equal(saved.drained, true);
+  assert.equal(saved.finalCounters.activeMutationRequests, 0);
+  assert.equal(saved.inspectorClosed, false);
   assert.equal(result.output.canRestart, false); // external socket proof is a separate gate
   assert.equal(refusedBeforeDrain, true);
   assert.equal(await connect(port), false);

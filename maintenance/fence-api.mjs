@@ -1,11 +1,12 @@
 // Self-contained function for stringify/evaluation in a separate CJS process.
 // Fences only the existing API listener; it does not patch application state.
-export async function fenceApiListener(port = 8791, {modulePath = '/app/scripts/jp-evolution-local-api.mjs', timeoutMs = 30000} = {}) {
+export async function fenceApiListener(port = 8791, {modulePath = '/app/scripts/jp-evolution-local-api.mjs', timeoutMs = 30000, onDrained} = {}) {
   const fs = require('node:fs');
   const net = require('node:net');
   if (!Number.isInteger(port) || port < 1 || port > 65535 ||
       typeof modulePath !== 'string' || !modulePath.startsWith('/') ||
-      !Number.isInteger(timeoutMs) || timeoutMs < 1) throw Error('fence_arguments_invalid');
+      !Number.isInteger(timeoutMs) || timeoutMs < 1 ||
+      (onDrained !== undefined && typeof onDrained !== 'function')) throw Error('fence_arguments_invalid');
   const deadline = Date.now() + Math.min(timeoutMs, 30000);
   const pids = fs.readdirSync('/proc').filter(name => /^\d+$/.test(name) && name !== String(process.pid)).filter(name => {
     try { return fs.readFileSync(`/proc/${name}/cmdline`, 'utf8').includes(`import('${modulePath}')`); }
@@ -163,6 +164,9 @@ export async function fenceApiListener(port = 8791, {modulePath = '/app/scripts/
     }
     if (!result.drained && !result.observationFailed && !result.closeError) result.timedOut = true;
     // A separate, external socket check remains required before restart.
+    // The target can exit naturally as soon as Inspector closes. Let the
+    // administrative child seal the observed proof before that boundary.
+    if (result.drained && onDrained) onDrained(result);
     return result;
   } finally {
     if (socket?.readyState === 1) {
