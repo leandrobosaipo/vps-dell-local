@@ -66,8 +66,8 @@ export async function fenceApiListener(port = 8791, {modulePath = '/app/scripts/
       pending.set(id, {resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); }});
       socket.send(JSON.stringify({id, method, params}));
     });
-    const call = async (objectId, functionDeclaration, awaitPromise = false) => {
-      const row = await send('Runtime.callFunctionOn', {objectId, functionDeclaration, awaitPromise, returnByValue: awaitPromise});
+    const call = async (objectId, functionDeclaration) => {
+      const row = await send('Runtime.callFunctionOn', {objectId, functionDeclaration, awaitPromise: false, returnByValue: false});
       if (row.exceptionDetails) throw Error('inspector_call_failed');
       return row.result;
     };
@@ -78,15 +78,18 @@ export async function fenceApiListener(port = 8791, {modulePath = '/app/scripts/
     if (!serverId) throw Error('api_server_identity_ambiguous');
     const handler = await call(serverId, 'function(){const handlers=this.listeners("request");return handlers.length===1?handlers[0]:null}');
     if (!handler?.objectId) throw Error('api_handler_missing');
-    const props = await send('Runtime.getProperties', {objectId: handler.objectId, ownProperties: true});
-    const scopesId = props.internalProperties?.find(property => property.name === '[[Scopes]]')?.value?.objectId;
-    if (!scopesId) throw Error('api_scopes_missing');
-    const scopes = await send('Runtime.getProperties', {objectId: scopesId, ownProperties: true});
-    const moduleScopeId = scopes.result?.find(property => property.value?.description === 'Module')?.value?.objectId;
-    if (!moduleScopeId) throw Error('api_module_scope_missing');
 
     const busyNames = ['reactivation', 'rescheduleOffers', 'newVisits', 'currentVisitResolution', 'replyAutomation'];
     async function counters() {
+      // Scope remote objects snapshot primitive bindings when materialized.
+      // Re-obtain the handler's scopes for every reading so a changed counter
+      // is observed after the in-flight request finishes.
+      const props = await send('Runtime.getProperties', {objectId: handler.objectId, ownProperties: true});
+      const scopesId = props.internalProperties?.find(property => property.name === '[[Scopes]]')?.value?.objectId;
+      if (!scopesId) throw Error('api_scopes_missing');
+      const scopes = await send('Runtime.getProperties', {objectId: scopesId, ownProperties: true});
+      const moduleScopeId = scopes.result?.find(property => property.value?.description === 'Module')?.value?.objectId;
+      if (!moduleScopeId) throw Error('api_module_scope_missing');
       const properties = await send('Runtime.getProperties', {objectId: moduleScopeId, ownProperties: true});
       const values = {};
       for (const property of properties.result ?? []) {
@@ -104,45 +107,61 @@ export async function fenceApiListener(port = 8791, {modulePath = '/app/scripts/
       return values;
     }
     async function connections() {
-      const row = await call(serverId,
-        'function(){return new Promise(resolve=>this.getConnections((error,count)=>resolve({error:!!error,count}))) }', true);
-      if (row.type !== 'object' || row.value?.error || !Number.isInteger(row.value?.count) || row.value.count < 0)
+      // Node's net.Server maintains this native count synchronously. An
+      // Inspector call awaiting getConnections(callback) can hold CDP until
+      // the callback and starve the target's request/IPC event loop.
+      const row = await call(serverId, 'function(){return this._connections}');
+      if (row.type !== 'number' || !Number.isInteger(row.value) || row.value < 0)
         throw Error('api_connections_read_failed');
-      return row.value.count;
+      return row.value;
     }
     const initialCounters = await counters();
     const initialConnections = await connections();
     result = {pid: Number(pids[0]), closeCalled: false, closeCallback: false, closeError: false,
-      drained: false, canRestart: false, inspectorClosed: false, observationFailed: false, timedOut: false, initialCounters,
+      drained: false, canRestart: false, inspectorClosed: false, observationFailed: false, observationStage: 0,
+      timedOut: false, initialCounters,
       initialConnections, finalCounters: initialCounters, finalConnections: initialConnections};
 
     // Dispatch exactly one native close(). Keep remote server/handler/scope refs
     // alive in this inspector session until callback, zero connections and idle.
-    let closeSettled = false;
-    const closePromise = call(serverId,
-      'function(){return new Promise(resolve=>this.close(error=>resolve({callback:true,error:!!error}))) }', true)
-      .then(row => {
-        closeSettled = true;
-        result.closeCallback = row.type === 'object' && row.value?.callback === true;
-        result.closeError = row.type !== 'object' || row.value?.error !== false;
-      }, () => { closeSettled = true; result.closeError = true; });
+    const closeHandle = await call(serverId,
+      'function(){return new Promise(resolve=>this.close(error=>resolve({callback:true,error:!!error}))) }');
     result.closeCalled = true;
+    if (!closeHandle.objectId) throw Error('api_close_promise_missing');
+    async function closeState() {
+      const state = await send('Runtime.getProperties', {objectId: closeHandle.objectId, ownProperties: true});
+      const internals = state.internalProperties ?? [];
+      const status = internals.find(property => property.name === '[[PromiseState]]')?.value?.value;
+      if (status === 'pending') return false;
+      if (status !== 'fulfilled') { result.closeError = true; return true; }
+      const proofId = internals.find(property => property.name === '[[PromiseResult]]')?.value?.objectId;
+      if (!proofId) { result.closeError = true; return true; }
+      const proof = await send('Runtime.getProperties', {objectId: proofId, ownProperties: true});
+      const values = Object.fromEntries((proof.result ?? []).filter(property => property.name === 'callback' || property.name === 'error')
+        .map(property => [property.name, property.value?.value]));
+      result.closeCallback = values.callback === true;
+      result.closeError = values.error !== false;
+      return true;
+    }
     while (Date.now() < deadline) {
       try {
+        result.observationStage = 1;
+        const closeSettled = await closeState();
+        result.observationStage = 2;
         result.finalCounters = await counters();
+        result.observationStage = 3;
         result.finalConnections = await connections();
+        result.observationStage = 0;
+        if (closeSettled && result.closeError) break;
+        const idle = Object.values(result.finalCounters).every(value => value === false || value === 0);
+        if (closeSettled && result.closeCallback && result.finalConnections === 0 && idle) {
+          result.drained = true;
+          break;
+        }
       } catch { result.observationFailed = true; break; }
-      const idle = Object.values(result.finalCounters).every(value => value === false || value === 0);
-      if (closeSettled && result.closeCallback && !result.closeError && result.finalConnections === 0 && idle) {
-        result.drained = true;
-        break;
-      }
       await new Promise(resolve => setTimeout(resolve, 100));
     }
-    if (!result.drained && !result.observationFailed) result.timedOut = true;
-    // closePromise has a rejection handler; an unfinished native close remains
-    // in effect after the bounded observation window.
-    void closePromise;
+    if (!result.drained && !result.observationFailed && !result.closeError) result.timedOut = true;
     // A separate, external socket check remains required before restart.
     return result;
   } finally {

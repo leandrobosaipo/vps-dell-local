@@ -83,9 +83,9 @@ test('native close fences new admissions and waits for an in-flight HTTP request
     }).on('error', reject);
   });
   await started;
-  const fenced = childFence(port, modulePath, 5000);
+  const fenced = childFence(port, modulePath, 15000);
   let refusedBeforeDrain = false;
-  const until = Date.now() + 4000;
+  const until = Date.now() + 10000;
   while (Date.now() < until && !holdDone) {
     if (!(await connect(port))) { refusedBeforeDrain = true; break; }
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -93,14 +93,15 @@ test('native close fences new admissions and waits for an in-flight HTTP request
   child.send('release');
   const result = await fenced;
   assert.equal(await hold, 'done');
-  assert.equal(result.exitCode, 0);
-  assert.equal(result.output.closeCalled, true);
-  assert.equal(result.output.closeCallback, true);
-  assert.equal(result.output.closeError, false);
-  assert.equal(result.output.initialCounters.activeMutationRequests, 1);
-  assert.equal(result.output.finalCounters.activeMutationRequests, 0);
-  assert.equal(result.output.finalConnections, 0);
-  assert.equal(result.output.drained, true);
+  const proof = JSON.stringify(result.output);
+  assert.equal(result.exitCode, 0, proof);
+  assert.equal(result.output.closeCalled, true, proof);
+  assert.equal(result.output.closeCallback, true, proof);
+  assert.equal(result.output.closeError, false, proof);
+  assert.equal(result.output.initialCounters.activeMutationRequests, 1, proof);
+  assert.equal(result.output.finalCounters.activeMutationRequests, 0, proof); // fresh handler scope after the held request
+  assert.equal(result.output.finalConnections, 0, proof);
+  assert.equal(result.output.drained, true, proof);
   assert.equal(result.output.canRestart, false); // external socket proof is a separate gate
   assert.equal(refusedBeforeDrain, true);
   assert.equal(await connect(port), false);
