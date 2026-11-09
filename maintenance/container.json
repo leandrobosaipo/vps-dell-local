@@ -1,0 +1,14 @@
+{
+  "purpose": "Temporary receive-only JP maintenance intake on the existing Mac host; not the Dell production migration",
+  "name": "jp-maintenance-ingress-20261109",
+  "image": "sha256:f1c565ca90628ccad5285996715df3a6d365bb4c68a4709e0458251e285c4fc1",
+  "entrypoint": ["/usr/local/bin/node"],
+  "command": ["/source/ingress.mjs", "--source", "evolution", "--dir", "/records", "--bind", "0.0.0.0", "--port", "8787", "--token-file", "/secrets/token", "--key-file", "/secrets/key", "--instance-file", "/secrets/instance", "--min-free-bytes", "536870912"],
+  "network": "cod5-evolution-net",
+  "published_ports": [],
+  "host_directory": "/home/codigo5/jp-attendance-state/maintenance-20261109",
+  "mounts": [{"relative_source":"source","target":"/source","readonly":true},{"relative_source":"secrets","target":"/secrets","readonly":true},{"relative_source":"records","target":"/records","readonly":false}],
+  "runtime": {"readonly_rootfs":true,"restart":"unless-stopped","memory_bytes":134217728,"nano_cpus":250000000,"pids_limit":64,"cap_drop":["ALL"],"security_opt":["no-new-privileges:true"],"log_driver":"none","user":"0:0"},
+  "handover_n8n": {"name":"jp-maintenance-n8n-ingress-20261109","source":"n8n","workflow_id":"ip1r95AlEgWDwrS5","relative_secret_directory":"secrets-n8n","relative_record_directory":"records-n8n","url":"http://jp-maintenance-n8n-ingress-20261109:8787/inbound","expected_original_url":"http://jp-attendance-api:8791/api/n8n/inbound","node_name":"Executar solicitação com proteção transacional","only_workflow_change":"parameters.url; keep credentials, method, body, headers, response codes, connections and settings"},
+  "rollback": "Restore only the saved JP webhook URL after drift/identity checks and a safe consumer path. Keep the encrypted records and key. Do not replay or restore old state; do not start the stopped emitter or republish clocks implicitly."
+}
