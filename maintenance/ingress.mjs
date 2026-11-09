@@ -33,18 +33,21 @@ function storageDir(dir) {
 
 function validateConfig(config) {
   const {dir, token, key, instance, workflowId} = config;
+  const source = config.source ?? 'n8n';
   if (typeof token !== 'string' || !token || /[\r\n]/.test(token)) fail('token_invalid');
   if (!Buffer.isBuffer(key) || key.length !== 32) fail('key_invalid');
   if (typeof instance !== 'string' || !instance || /[\r\n]/.test(instance)) fail('instance_invalid');
-  if (typeof workflowId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(workflowId)) fail('workflow_invalid');
-  return {...config, dir: storageDir(dir)};
+  if (source !== 'n8n' && source !== 'evolution') fail('source_invalid');
+  if (source === 'n8n' && (typeof workflowId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(workflowId))) fail('workflow_invalid');
+  if (source === 'evolution' && workflowId !== undefined) fail('workflow_not_applicable');
+  return {...config, source, dir: storageDir(dir)};
 }
 
-export function loadConfig({dir, tokenFile, keyFile, instanceFile, workflowId, minFreeBytes = 0}) {
+export function loadConfig({dir, tokenFile, keyFile, instanceFile, workflowId, source = 'n8n', minFreeBytes = 0}) {
   const token = privateFile(tokenFile, 4096).toString('utf8').trimEnd();
   const key = privateFile(keyFile, 32);
   const instance = privateFile(instanceFile, 4096).toString('utf8').trimEnd();
-  return validateConfig({dir, token, key, instance, workflowId, minFreeBytes});
+  return validateConfig({dir, token, key, instance, workflowId, source, minFreeBytes});
 }
 
 export function recordId(instance, raw) {
@@ -63,9 +66,12 @@ export function readRecord(file, key, expectedInstance, {allowLinkedTemp = false
   const encoded = privateFile(file, MAX_BODY_BYTES * 2, allowLinkedTemp);
   const record = JSON.parse(encoded.toString('utf8'));
   const {version, meta, iv, ciphertext, tag} = record;
-  if (version !== RECORD_VERSION || !meta || meta.version !== RECORD_VERSION ||
+  const source = meta?.source === undefined ? 'n8n' : meta.source;
+  const validProvenance = source === 'n8n'
+    ? typeof meta?.workflowId === 'string' && /^[A-Za-z0-9_-]+$/.test(meta.workflowId) && /^[0-9]+$/.test(meta.executionId)
+    : source === 'evolution' && meta?.workflowId === null && meta.executionId === null;
+  if (version !== RECORD_VERSION || !meta || meta.version !== RECORD_VERSION || !validProvenance ||
       typeof meta.instance !== 'string' || typeof meta.receivedAt !== 'string' ||
-      typeof meta.workflowId !== 'string' || !/^[0-9]+$/.test(meta.executionId) ||
       !HASH_RE.test(meta.rawSha256) ||
       typeof iv !== 'string' || typeof ciphertext !== 'string' || typeof tag !== 'string') fail('record_invalid');
   if (expectedInstance !== undefined && meta.instance !== expectedInstance) fail('record_instance_mismatch');
@@ -77,7 +83,7 @@ export function readRecord(file, key, expectedInstance, {allowLinkedTemp = false
   decipher.setAuthTag(tagBytes);
   const raw = Buffer.concat([decipher.update(Buffer.from(ciphertext, 'base64')), decipher.final()]);
   if (raw.length > MAX_BODY_BYTES || sha256(raw) !== meta.rawSha256 || filename !== `${recordId(meta.instance, raw)}.json`) fail('record_integrity_invalid');
-  return {id: filename.slice(0, -5), meta, raw};
+  return {id: filename.slice(0, -5), meta: {...meta, source}, raw};
 }
 
 function fsyncDir(dir) {
@@ -85,7 +91,7 @@ function fsyncDir(dir) {
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
-function recoverLinkedTemp(dir, id, key, instance, raw) {
+function recoverLinkedTemp(dir, id, key, instance, raw, source) {
   const target = path.join(dir, `${id}.json`);
   const targetSt = fs.lstatSync(target);
   if (targetSt.nlink === 1) return readRecord(target, key, instance);
@@ -98,7 +104,7 @@ function recoverLinkedTemp(dir, id, key, instance, raw) {
   });
   if (matches.length !== 1) fail('record_temp_ambiguous');
   const existing = readRecord(target, key, instance, {allowLinkedTemp: true});
-  if (!existing.raw.equals(raw)) fail('record_collision');
+  if (!existing.raw.equals(raw) || existing.meta.source !== source) fail('record_collision');
   fs.unlinkSync(path.join(dir, matches[0]));
   fsyncDir(dir);
   return readRecord(target, key, instance);
@@ -113,21 +119,23 @@ function freeSpaceOK(config, bytes) {
 export function persistRaw(configInput, raw, provenance, hooks = {}) {
   const config = validateConfig(configInput);
   if (!Buffer.isBuffer(raw) || raw.length > MAX_BODY_BYTES) fail('raw_invalid');
-  if (provenance?.workflowId !== config.workflowId || typeof provenance.executionId !== 'string' ||
-      !/^[0-9]+$/.test(provenance.executionId)) fail('provenance_invalid');
+  if (config.source === 'n8n' && (provenance?.workflowId !== config.workflowId ||
+      typeof provenance.executionId !== 'string' || !/^[0-9]+$/.test(provenance.executionId))) fail('provenance_invalid');
+  if (config.source === 'evolution' && provenance != null) fail('provenance_not_applicable');
   if (!freeSpaceOK(config, raw.length)) fail('space_insufficient');
   const id = recordId(config.instance, raw);
   const target = path.join(config.dir, `${id}.json`);
   // A linked file from an interrupted attempt is recoverable only after full
   // authentication and another directory fsync.
   if (fs.existsSync(target)) {
-    const existing = recoverLinkedTemp(config.dir, id, config.key, config.instance, raw);
-    if (!existing.raw.equals(raw)) fail('record_collision');
+    const existing = recoverLinkedTemp(config.dir, id, config.key, config.instance, raw, config.source);
+    if (!existing.raw.equals(raw) || existing.meta.source !== config.source) fail('record_collision');
     fsyncDir(config.dir);
     return {id, duplicate: true};
   }
-  const meta = {version: RECORD_VERSION, instance: config.instance, receivedAt: new Date().toISOString(),
-    rawSha256: sha256(raw), workflowId: provenance.workflowId, executionId: provenance.executionId};
+  const meta = {version: RECORD_VERSION, source: config.source, instance: config.instance, receivedAt: new Date().toISOString(),
+    rawSha256: sha256(raw), workflowId: config.source === 'n8n' ? provenance.workflowId : null,
+    executionId: config.source === 'n8n' ? provenance.executionId : null};
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', config.key, iv);
   cipher.setAAD(aad(meta));
@@ -148,8 +156,8 @@ export function persistRaw(configInput, raw, provenance, hooks = {}) {
     try { fs.linkSync(temp, target); }
     catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      const existing = recoverLinkedTemp(config.dir, id, config.key, config.instance, raw);
-      if (!existing.raw.equals(raw)) fail('record_collision');
+      const existing = recoverLinkedTemp(config.dir, id, config.key, config.instance, raw, config.source);
+      if (!existing.raw.equals(raw) || existing.meta.source !== config.source) fail('record_collision');
       fsyncDir(config.dir);
       return {id, duplicate: true};
     }
@@ -206,7 +214,9 @@ export function createHandler(configInput, hooks = {}) {
     const auth = header(req, 'authorization');
     const workflowId = header(req, 'x-jp-n8n-workflow-id');
     const executionId = header(req, 'x-jp-n8n-execution-id');
-    if (!safeEqualBearer(auth, config.token) || workflowId !== config.workflowId || !/^[0-9]+$/.test(executionId ?? ''))
+    if (!safeEqualBearer(auth, config.token) ||
+        (config.source === 'n8n' && (workflowId !== config.workflowId || !/^[0-9]+$/.test(executionId ?? ''))) ||
+        (config.source === 'evolution' && (workflowId !== undefined || executionId !== undefined)))
       return reply(res, 401, {error: 'unauthorized'});
     const statedLength = header(req, 'content-length');
     if (statedLength && Number(statedLength) > MAX_BODY_BYTES) return reply(res, 413, {error: 'body_too_large'});
@@ -217,7 +227,7 @@ export function createHandler(configInput, hooks = {}) {
       if (!instanceMatches(raw, config.instance)) return reply(res, 401, {error: 'instance_mismatch'});
     } catch { return reply(res, 400, {error: 'invalid_json'}); }
     try {
-      const result = persistRaw(config, raw, {workflowId, executionId}, hooks);
+      const result = persistRaw(config, raw, config.source === 'n8n' ? {workflowId, executionId} : null, hooks);
       return reply(res, 202, result);
     } catch { return reply(res, 503, {error: 'intake_unavailable'}); }
   };
@@ -232,14 +242,17 @@ function args(argv) {
     if (!key?.startsWith('--') || i + 1 >= argv.length || Object.hasOwn(values, key)) fail('arguments_invalid');
     values[key] = argv[i + 1];
   }
-  const allowed = ['--dir', '--bind', '--port', '--token-file', '--key-file', '--instance-file', '--workflow-id', '--min-free-bytes'];
+  const allowed = ['--dir', '--bind', '--port', '--token-file', '--key-file', '--instance-file', '--workflow-id', '--min-free-bytes', '--source'];
   if (Object.keys(values).some(key => !allowed.includes(key))) fail('arguments_invalid');
-  for (const key of allowed.slice(0, 7)) if (!values[key]) fail('arguments_missing');
+  for (const key of allowed.slice(0, 6)) if (!values[key]) fail('arguments_missing');
+  const source = values['--source'] ?? 'n8n';
+  if (source !== 'n8n' && source !== 'evolution') fail('arguments_invalid');
+  if (source === 'n8n' && !values['--workflow-id']) fail('arguments_missing');
   const port = Number(values['--port']);
   const minFreeBytes = Number(values['--min-free-bytes'] ?? 0);
   if (!Number.isInteger(port) || port < 1 || port > 65535 || !Number.isSafeInteger(minFreeBytes) || minFreeBytes < 0) fail('arguments_invalid');
   return {dir: values['--dir'], bind: values['--bind'], port, tokenFile: values['--token-file'],
-    keyFile: values['--key-file'], instanceFile: values['--instance-file'], workflowId: values['--workflow-id'], minFreeBytes};
+    keyFile: values['--key-file'], instanceFile: values['--instance-file'], workflowId: values['--workflow-id'], source, minFreeBytes};
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {
