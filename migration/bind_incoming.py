@@ -22,10 +22,20 @@ def with_receipt_resume(graph):
     stage['name']='Retomar arte após recibo e conferir pausa humana'
     stage['position']=[process['position'][0]+210,process['position'][1]]
     stage['parameters']['url']=origin._replace(path='/resume').geturl()
-    stage['parameters']['jsonBody']='={{ {record_id:$json.record_id} }}'
+    if params.get('options',{}).get('response',{}).get('response',{}).get('fullResponse') is not True:
+        raise ValueError('expected_full_http_response')
+    stage['parameters']['jsonBody']='={{ {record_id:$json.body.record_id} }}'
     stage['retryOnFail']=False
-    bound['nodes'].append(stage);bound['connections'][stage['name']]={'main':copy.deepcopy(edges)}
-    edges[0]=[{'node':stage['name'],'type':'main','index':0}]
+    guard={'id':str(uuid.uuid5(uuid.NAMESPACE_URL,process['id']+'/check-confirmation')),
+           'name':'Há uma continuação autorizável?', 'type':'n8n-nodes-base.if','typeVersion':2.2,
+           'position':[process['position'][0]+105,process['position'][1]],
+           'parameters':{'conditions':{'options':{'caseSensitive':True,'leftValue':'','typeValidation':'strict','version':2},
+                'conditions':[{'id':str(uuid.uuid4()),'leftValue':'={{ $json.statusCode === 200 && $json.body?.resume_pending === true }}',
+                    'rightValue':'','operator':{'type':'boolean','operation':'true','singleValue':True}}],
+                'combinator':'and'},'options':{}}}
+    bound['nodes'].extend([guard,stage]);bound['connections'][stage['name']]={'main':copy.deepcopy(edges)}
+    bound['connections'][guard['name']]={'main':[[{'node':stage['name'],'type':'main','index':0}],copy.deepcopy(edges[0])]}
+    edges[0]=[{'node':guard['name'],'type':'main','index':0}]
     return bound
 
 

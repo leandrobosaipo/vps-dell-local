@@ -182,10 +182,11 @@ export function createReceiveService(config,route,queue,request=fetch,observe=ob
           queue.finishContinuation(id,execution,outcome);
         }
       }
-      return reply(res,200,{ok:true,record_id:id,execution,outcome});
+      return reply(res,200,{ok:true,record_id:id,workflow:workflowId,execution,status:'retained',outcome});
     }
     let claimed;try{claimed=queue.claim(id,execution);}catch{return reply(res,409,{ok:false,reason:'held'});}
-    if(claimed.state==='completed')return reply(res,200,{ok:true,duplicate:true,record_id:id,execution:claimed.execution});
+    if(claimed.state==='completed')return reply(res,200,{ok:true,duplicate:true,record_id:id,execution:claimed.execution,
+      resume_pending:observer?.resume===true&&queue.status(id).outcome===JSON.stringify('confirmed_receipt')});
     try{
       let confirmed=false;
       if(observer){
@@ -198,7 +199,7 @@ export function createReceiveService(config,route,queue,request=fetch,observe=ob
         }
         if(observer.fixtureOnly){
           queue.finish(id,execution,true,confirmed?'confirmed_receipt':'retained');
-          return reply(res,200,{ok:true,record_id:id,execution,status:'retained'});
+          return reply(res,200,{ok:true,record_id:id,execution,status:'retained',resume_pending:confirmed});
         }
       }
       if(customer?.fixtureOnly&&!customer.owns(id,claimed.epoch)){
@@ -220,7 +221,7 @@ export function createReceiveService(config,route,queue,request=fetch,observe=ob
       assert(result.ok&&data.ok===true&&data.record_id===id&&data.workflow===workflowId&&data.execution===execution);
       assert(['processed','retained'].includes(data.status));
       queue.finish(id,execution,true,confirmed?'confirmed_receipt':data.status);
-      return reply(res,200,{ok:true,record_id:id,execution,status:data.status});
+      return reply(res,200,{ok:true,record_id:id,execution,status:data.status,resume_pending:confirmed});
     }catch{
       // Covers rejection, loss of the HTTP response and an unexpected result shape.
       // Never manufacture a second Central call for an ambiguous business outcome.
