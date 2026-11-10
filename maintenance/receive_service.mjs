@@ -258,6 +258,11 @@ export function createReceiveService(config,route,queue,request=fetch,observe=ob
           owner=route.businessCore;
         }
       }
+      // Group events and unmatched provider receipts belong to the scheduler's ledger too.
+      if(!owner && route.nativeBusinessControls){
+        assert(queue.owner().epoch===claimed.epoch && queue.status(id).state==='claimed');
+        owner=route.businessCore;
+      }
       const result=await request(owner?.url||core.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(owner?125000:20000),
         headers:{'Content-Type':'application/json',Authorization:'Bearer '+(owner?.token||route.coreToken),
           ...(owner?{'X-JP-Owner-Epoch':claimed.epoch}:{}),

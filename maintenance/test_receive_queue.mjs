@@ -122,6 +122,13 @@ test('direct business replies require identity readback and issue exactly one ca
     assert.equal(calls.length,expectedCalls);assert.match(calls[0],/\/business-preflight$/);
     if(expectedCalls===2)assert.equal(calls[1],route.businessCore.url);
   }
+  for(const [event,jid,fromMe] of [['messages.upsert','12000000000@g.us',false],['messages.update','5511960000001@s.whatsapp.net',true]]){
+    const raw=Buffer.from(JSON.stringify({instance:'fixture',event,data:{key:{remoteJid:jid,id:'FIXTURE-'+event,fromMe}}}));
+    append(raw);calls.length=0;
+    const response=await fetch('http://127.0.0.1:'+service.address().port+'/process',{method:'POST',headers:{
+      Authorization:'Bearer '+route.processToken,'X-JP-n8n-workflow-id':route.workflowId,'X-JP-n8n-execution-id':'71'},body:JSON.stringify({record_id:id(raw)})});
+    assert.equal(response.status,200);assert.deepEqual(calls,[route.businessCore.url]);
+  }
 });
 test('current owner routes unseen direct inputs, retains stale or ambiguous direct claims',async t=>{
   const {queue:q,config:c,id,append}=setup(t),epoch=randomUUID(),token=()=>randomBytes(32).toString('hex');
