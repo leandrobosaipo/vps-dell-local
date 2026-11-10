@@ -5,6 +5,7 @@ import {createHash,timingSafeEqual} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import {createHandler,loadConfig} from './ingress.mjs';
 import {ReceiveQueue} from './receive_queue.mjs';
+import {isIPv4} from 'node:net';
 
 function authorized(header,token){
   if(typeof header!=='string'||typeof token!=='string'||token.length<32)return false;
@@ -12,6 +13,24 @@ function authorized(header,token){
   return timingSafeEqual(hash(header),hash('Bearer '+token));
 }
 function reply(res,status,value){res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));}
+function directOwner(route,tokens){
+  if(!route)return null;
+  const url=new URL(route.url);
+  assert(isIPv4(url.hostname)&&/^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(url.hostname));
+  assert.equal(url.href,'http://'+url.hostname+':19735/channel-inbound');
+  assert(typeof route.token==='string'&&route.token.length>=32&&!tokens.includes(route.token));
+  assert(/^[a-f0-9-]{36}$/.test(route.epoch)&&Array.isArray(route.senders)&&route.senders.length>0);
+  assert(route.senders.every(s=>typeof s==='string'&&/^[0-9a-f]{64}$/.test(s)));
+  const senders=new Set(route.senders);
+  return {url:url.href,token:route.token,epoch:route.epoch,select(raw,epoch,instance){
+    if(epoch!==route.epoch)return false;
+    const body=JSON.parse(raw);
+    const key=body?.data?.key;
+    if(body?.instance!==instance||String(body.event).toLowerCase().replaceAll('_','.')!=='messages.upsert'||
+        key?.fromMe!==false||typeof key.remoteJid!=='string'||!/^\d{6,20}@(lid|s\.whatsapp\.net)$/.test(key.remoteJid))return false;
+    return senders.has(createHash('sha256').update(instance).update(Buffer.from([0])).update(key.remoteJid).digest('hex'));
+  }};
+}
 async function readId(req){
   let bytes=0;const chunks=[];
   for await(const chunk of req){bytes+=chunk.length;assert(bytes<=256);chunks.push(chunk);}
@@ -28,6 +47,7 @@ export function createReceiveService(config,route,queue,request=fetch){
   assert(/^[a-zA-Z0-9]{8,32}$/.test(route.workflowId));
   assert(new Set([route.processToken,route.triggerToken,route.coreToken,config.token]).size===4);
   for(const token of [route.processToken,route.triggerToken,route.coreToken,config.token])assert(typeof token==='string'&&token.length>=32);
+  const chat=directOwner(route.direct,[route.processToken,route.triggerToken,route.coreToken,config.token]);
   let waking=false,recoveryCursor=0;
   async function wake(limit){
     if(waking)return 0;
@@ -39,7 +59,7 @@ export function createReceiveService(config,route,queue,request=fetch){
         // If n8n disappears before claiming, the record stays ready for the next n8n drain.
         // A claim without a final receipt stays claimed for reconciliation by that ID.
         try{
-          const res=await request(workflow.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(15000),
+          const res=await request(workflow.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(chat?140000:15000),
             headers:{'Content-Type':'application/json',Authorization:'Bearer '+route.triggerToken},body:JSON.stringify({record_id:id})});
           await res.body?.cancel();
           if(!res.ok)break;
@@ -68,8 +88,10 @@ export function createReceiveService(config,route,queue,request=fetch){
     let claimed;try{claimed=queue.claim(id,execution);}catch{return reply(res,409,{ok:false,reason:'held'});}
     if(claimed.state==='completed')return reply(res,200,{ok:true,duplicate:true,record_id:id,execution:claimed.execution});
     try{
-      const result=await request(core.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(20000),
-        headers:{'Content-Type':'application/json',Authorization:'Bearer '+route.coreToken,
+      const mapped=chat?.select(claimed.raw,claimed.epoch,config.instance);
+      const result=await request(mapped?chat.url:core.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(mapped?125000:20000),
+        headers:{'Content-Type':'application/json',Authorization:'Bearer '+(mapped?chat.token:route.coreToken),
+          ...(mapped?{'X-JP-Owner-Epoch':claimed.epoch}:{}),
           'X-JP-n8n-workflow-id':workflowId,'X-JP-n8n-execution-id':execution,'X-JP-Record-ID':id},
         body:claimed.raw});
       const data=await result.json();

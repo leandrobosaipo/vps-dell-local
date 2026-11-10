@@ -31,7 +31,7 @@ def bind_incoming(row, trigger, consumer, hook):
                 headerParameters={'parameters':[
                     {'name':'X-JP-n8n-workflow-id','value':'={{ $workflow.id }}'},
                     {'name':'X-JP-n8n-execution-id','value':'={{ $execution.id }}'}]})
-            params['options']={'timeout':30000, 'redirect':{'redirect':{'followRedirects':False}},
+            params['options']={'timeout':135000, 'redirect':{'redirect':{'followRedirects':False}},
                 'response':{'response':{'responseFormat':'json','fullResponse':True,'neverError':True}}}
             node['credentials'] = {'httpHeaderAuth':consumer}
         elif kind != 'respondToWebhook':

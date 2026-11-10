@@ -101,7 +101,7 @@ export class ReceiveQueue {
       const record=readRecord(path.join(this.records,id+'.json'),this.key,this.instance);
       assert.equal(record.meta.source,'evolution');
       this.db.prepare("UPDATE receipts SET state='claimed',execution=? WHERE id=?").run(execution,id);
-      return {state:'claimed',raw:record.raw};
+      return {state:'claimed',epoch:row.epoch,raw:record.raw};
     });
   }
   finish(id,execution,ok,outcome) {

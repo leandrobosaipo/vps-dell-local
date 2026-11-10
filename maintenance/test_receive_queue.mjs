@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import http from 'node:http';
-import {randomBytes,randomUUID} from 'node:crypto';
+import {createHash,randomBytes,randomUUID} from 'node:crypto';
 import {recordId,persistRaw} from './ingress.mjs';
 import {ReceiveQueue} from './receive_queue.mjs';
 import {createReceiveService} from './receive_service.mjs';
@@ -41,6 +41,29 @@ test('recover a reservation after durable write, retain on close and preserve un
   q.reserve(id(orphan));assert.throws(()=>q.recover(id(orphan)));append(pending);
   q.changeOwner(epoch,'');append(orphan);assert.equal(q.status(id(orphan)).state,'retained');
   assert.equal(q.status(id(pending)).state,'retained');assert.equal(q.status(id(b)).state,'uncertain');
+});
+test('only a direct identity assigned to the current epoch goes to the chat consumer',async t=>{
+  const {queue:q,config:c,id,append}=setup(t);const epoch=randomUUID(),jid='10000001@lid';
+  const token=()=>randomBytes(32).toString('hex');
+  const route={workflowId:'abcdefgh',webhook:'http://clock:5678/webhook/authorized-trigger',core:'http://jp-core-transacional-dell:8791/api/n8n/inbound',coreToken:token(),processToken:token(),triggerToken:token(),
+    direct:{url:'http://172.18.0.1:19735/channel-inbound',token:token(),epoch,senders:[createHash('sha256').update('fixture\0'+jid).digest('hex')]}};
+  assert.throws(()=>createReceiveService(c,{...route,direct:{...route.direct,url:'https://example.invalid'}},q));
+  let expected;
+  const calls=[];
+  async function consume(url,opt){
+    calls.push(url);assert.equal(opt.headers.Authorization,'Bearer '+(expected?route.direct.token:route.coreToken));
+    assert.equal(opt.headers['X-JP-Owner-Epoch'],expected?epoch:undefined);
+    return Response.json({ok:true,status:'retained',workflow:route.workflowId,execution:'70',record_id:id(opt.body)});
+  }
+  const service=http.createServer(createReceiveService(c,route,q,consume));
+  await new Promise(r=>service.listen(0,'127.0.0.1',r));t.after(()=>{service.closeAllConnections();service.close();});
+  q.changeOwner('',epoch);
+  for(const [sender,own,ok] of [[jid,false,true],['10000002@lid',false,false],[jid,true,false],['10000001@g.us',false,false]]){
+    expected=ok;const raw=Buffer.from(JSON.stringify({instance:'fixture',event:'messages.upsert',data:{key:{remoteJid:sender,fromMe:own}}}));append(raw);
+    const res=await fetch('http://127.0.0.1:'+service.address().port+'/process',{method:'POST',headers:{Authorization:'Bearer '+route.processToken,'X-JP-n8n-workflow-id':route.workflowId,'X-JP-n8n-execution-id':'70'},body:JSON.stringify({record_id:id(raw)})});
+    assert.equal(res.status,200);assert.equal(calls.at(-1),ok?route.direct.url:route.core);
+  }
+  assert.equal(calls.length,4);
 });
 test('webhook forwards references only; authentic n8n claim sends the exact bytes once',async t=>{
   const {queue:q,config:c,raw,id}=setup(t);const bytes=raw(27),rid=id(bytes);
