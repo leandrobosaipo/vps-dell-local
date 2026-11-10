@@ -85,19 +85,28 @@ async function main() {
     return created;
   }
   const created=read('create-result'),c=candidate(created);
+  const movedItem={...item,time:selected.times[1],appointment_id:c.appointment_id,excluded_appointment_ids:created.before_appointment_ids};
   if(action==='move') {
-    assert(!exists('move-intent'));await free(selected.times[1]);
+    if(exists('move-intent')){
+      const intent=read('move-intent');
+      assert.equal(intent.snapshot.appointment_id,c.appointment_id);
+      assert.equal(intent.snapshot.item_code,created.readback.item_code);
+      const readback=await readCreatedVisitItem(movedItem,config);
+      assert.equal(readback.item_code,created.readback.item_code);
+      return {status:'saved',before:intent.snapshot,readback,reconciledByReadOnly:true};
+    }
+    await free(selected.times[1]);
     const moved=await moveOfficialAppointment(c,{date,time:selected.times[1],professional_code:selected.professional},config,guard('move'));
     assert.equal(moved.status,'saved');assert.equal(moved.readback.appointment_id,c.appointment_id);
     assert.equal(moved.readback.item_code,created.readback.item_code);
-    await readCreatedVisitItem({...item,time:selected.times[1],appointment_id:c.appointment_id},config);
+    await readCreatedVisitItem(movedItem,config);
     return moved;
   }
   const moved=read('move-result');
   assert.equal(moved.readback.appointment_id,c.appointment_id);
   if(action==='cancel'){
     assert(!exists('cancel-intent'));
-    const canceled=await cancelControlledTestVisit({...item,time:selected.times[1],appointment_id:c.appointment_id,creation_proof:created},config,{markAttempt:guard('cancel')});
+    const canceled=await cancelControlledTestVisit({...movedItem,creation_proof:created},config,{markAttempt:guard('cancel')});
     assert.equal(canceled.status,'canceled');assert.equal(canceled.appointment_id,c.appointment_id);
     return canceled;
   }
@@ -106,7 +115,10 @@ async function main() {
   assert(current.length===0||(current.length===1&&String(current[0].codStatus)==='4'));
   const future=await readExistingVisitItems(item,config);
   assert(!future.some(r=>String(r.Age_Codigo)===c.appointment_id));
-  return {status:'closed',appointment_id:c.appointment_id,confirmedAbsentFromActiveAgenda:true,confirmedAbsentFromPersonalFuture:true};
+  const otherIds=(await agenda()).map(r=>String(r.id)).filter(i=>i!==c.appointment_id).sort();
+  const baseline=[...created.before_appointment_ids].sort();
+  return {status:'closed',appointment_id:c.appointment_id,confirmedAbsentFromActiveAgenda:true,confirmedAbsentFromPersonalFuture:true,
+    sameOtherAppointmentIds:JSON.stringify(otherIds)===JSON.stringify(baseline),otherAppointments:otherIds.length};
 }
 try{
   assert(!exists(action+'-result'));
