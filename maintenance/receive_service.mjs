@@ -13,6 +13,12 @@ function authorized(header,token){
   return timingSafeEqual(hash(header),hash('Bearer '+token));
 }
 function reply(res,status,value){res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));}
+export function intakeOnly(service){
+  return (req,res)=>{
+    if(!((req.method==='POST'&&req.url==='/inbound')||(req.method==='GET'&&req.url==='/healthz')))return reply(res,404,{ok:false});
+    return service(req,res);
+  };
+}
 function directOwner(route,tokens){
   if(!route)return null;
   const url=new URL(route.url);
@@ -115,5 +121,7 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
   const route=JSON.parse(fs.readFileSync('/access/route.json'));
   const queue=new ReceiveQueue('/data/index',config.dir,config.key,config.instance);
   const service=createReceiveService(config,route,queue);
-  http.createServer((req,res)=>service(req,res).catch(()=>reply(res,503,{ok:false}))).listen(8787,'0.0.0.0');
+  const handler=(req,res)=>service(req,res).catch(()=>reply(res,503,{ok:false}));
+  http.createServer(handler).listen(8787,'0.0.0.0');
+  if(route.publicIntake===true)http.createServer(intakeOnly(handler)).listen(8790,'0.0.0.0');
 }

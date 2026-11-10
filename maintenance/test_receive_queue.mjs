@@ -7,7 +7,7 @@ import http from 'node:http';
 import {createHash,randomBytes,randomUUID} from 'node:crypto';
 import {recordId,persistRaw} from './ingress.mjs';
 import {ReceiveQueue} from './receive_queue.mjs';
-import {createReceiveService} from './receive_service.mjs';
+import {createReceiveService,intakeOnly} from './receive_service.mjs';
 
 function setup(t){
   const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'jp-queue-')));
@@ -21,6 +21,15 @@ function setup(t){
   t.after(()=>{queue.close();fs.rmSync(root,{recursive:true});});
   return {queue,config,raw,id,append};
 }
+test('the external listener serves only the two intake operations',async t=>{
+  const calls=[];const service=http.createServer(intakeOnly((req,res)=>{calls.push(req.url);res.end('ok');}));
+  await new Promise(r=>service.listen(0,'127.0.0.1',r));t.after(()=>{service.closeAllConnections();service.close();});
+  const base='http://127.0.0.1:'+service.address().port;
+  for(const [method,path] of [['POST','/process'],['POST','/drain'],['GET','/inbound'],['POST','/inbound?path=drain'],['GET','/healthz'],['POST','/inbound']]){
+    const r=await fetch(base+path,{method});assert.equal(r.status,['/inbound','/healthz'].includes(path)&&!(method==='GET'&&path==='/inbound')?200:404);
+  }
+  assert.deepEqual(calls,['/healthz','/inbound']);
+});
 test('the first observation owns eligibility across retries, cut and return',t=>{
   const {queue:q,config:c,raw,id,append}=setup(t);
   const [a,b,d,e]=[1,2,3,4].map(raw);
