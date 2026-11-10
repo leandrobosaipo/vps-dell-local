@@ -108,6 +108,29 @@ test('one authenticated claim routes only enumerated customer fixture records',a
   assert.equal(q.status(id(raw)).state,'completed');
   assert.equal(q.status(id(other)).state,'completed');
 });
+
+test('claimed outgoing events notify the receipt socket by journal ID once',async t=>{
+  const {queue:q,config:c,id,append}=setup(t),epoch=randomUUID();
+  const event=(native,fromMe)=>Buffer.from(JSON.stringify({instance:c.instance,event:'messages.update',data:{
+    keyId:native,fromMe,status:'DELIVERY_ACK'}}));
+  const allowed=event('fixture-allowed',true), foreign=event('fixture-foreign',true), inbound=event('fixture-inbound',false);
+  const token=()=>randomBytes(32).toString('hex');
+  const route={workflowId:'abcdefgh',webhook:'http://clock:5678/webhook/authorized-trigger',
+    core:'http://jp-core-transacional-dell:8791/api/n8n/inbound',coreToken:token(),processToken:token(),triggerToken:token(),
+    receiptObserver:{epoch,fixtureOnly:true,records:[id(allowed),id(inbound)]}};
+  const seen=[];
+  const service=http.createServer(createReceiveService(c,route,q,()=>assert.fail('fixture reached a business route'),async record=>seen.push(record)));
+  await new Promise(r=>service.listen(0,'127.0.0.1',r));t.after(()=>{service.closeAllConnections();service.close();});
+  q.changeOwner('',epoch);
+  for(const body of [allowed,foreign,inbound])append(body);
+  for(const body of [allowed,allowed,foreign,inbound]){
+    const response=await fetch('http://127.0.0.1:'+service.address().port+'/process',{method:'POST',
+      headers:{Authorization:'Bearer '+route.processToken,'X-JP-n8n-workflow-id':route.workflowId,'X-JP-n8n-execution-id':'75'},
+      body:JSON.stringify({record_id:id(body)})});
+    assert.equal(response.status,200);
+  }
+  assert.deepEqual(seen,[id(allowed)]);
+});
 test('webhook forwards references only; authentic n8n claim sends the exact bytes once',async t=>{
   const {queue:q,config:c,raw,id}=setup(t);const bytes=raw(27),rid=id(bytes);
   const route={workflowId:'abcdefgh',webhook:'http://clock:5678/webhook/authorized-trigger',

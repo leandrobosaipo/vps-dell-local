@@ -66,7 +66,42 @@ async function readId(req){
   assert.deepEqual(Object.keys(body),['record_id']);assert.match(body.record_id,/^[0-9a-f]{64}$/);return body.record_id;
 }
 
-export function createReceiveService(config,route,queue,request=fetch){
+function observeDispatchRecord(id){
+  const body=JSON.stringify({record:id});
+  return new Promise((resolve,reject)=>{
+    const request=http.request({socketPath:'/dispatch/dispatch.sock',path:'/receipt-event',method:'POST',
+      signal:AbortSignal.timeout(10000),headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body)}},res=>{
+      let text='';
+      res.setEncoding('utf8');
+      res.on('error',reject);
+      res.on('data',chunk=>{text+=chunk;if(text.length>1024)res.destroy(Error('receipt_response_limit'));});
+      res.on('end',()=>{
+        try{
+          assert.equal(res.statusCode,200);
+          const row=JSON.parse(text);
+          for(const key of ['matched','waiting','confirmed'])assert(Number.isSafeInteger(row[key])&&row[key]>=0&&row[key]<=256);
+          assert.equal(row.waiting+row.confirmed,row.matched);
+          resolve(row);
+        }catch(error){reject(error);}
+      });
+    });
+    request.on('error',reject);request.end(body);
+  });
+}
+
+function outgoingReceipt(raw, instance){
+  let body=JSON.parse(raw);
+  if(Array.isArray(body)){
+    if(body.length!==1)return false;
+    [body]=body;
+  }
+  const event=String(body?.event).toLowerCase().replaceAll('_','.');
+  if(body?.instance!==instance||!['messages.upsert','messages.update'].includes(event))return false;
+  const rows=Array.isArray(body.data)?body.data:[body.data];
+  return rows.some(row=>(row?.fromMe??row?.key?.fromMe)===true);
+}
+
+export function createReceiveService(config,route,queue,request=fetch,observe=observeDispatchRecord){
   // The incoming JSON cannot choose an upstream, a recipient or a credential.
   const workflow=new URL(route.webhook), core=new URL(route.core);
   assert.equal(workflow.origin,'http://clock:5678');
@@ -78,6 +113,15 @@ export function createReceiveService(config,route,queue,request=fetch){
   const chat=directOwner(route.direct,[route.processToken,route.triggerToken,route.coreToken,config.token]);
   const customer=customerOwner(route.customer,[route.processToken,route.triggerToken,route.coreToken,config.token,chat?.token]);
   assert(!customer?.fixtureOnly||!chat);
+  const observer=route.receiptObserver;
+  if(observer){
+    assert(/^[a-f0-9-]{36}$/.test(observer.epoch)&&typeof observer.fixtureOnly==='boolean');
+    if(observer.fixtureOnly)assert(!customer&&!chat);
+    else assert(!customer?.fixtureOnly);
+    if(observer.fixtureOnly){
+      assert(Array.isArray(observer.records)&&observer.records.length>0&&observer.records.every(id=>/^[a-f0-9]{64}$/.test(id)));
+    }else assert(observer.records===undefined);
+  }
   let waking=false,recoveryCursor=0;
   async function wake(limit){
     if(waking)return 0;
@@ -118,6 +162,16 @@ export function createReceiveService(config,route,queue,request=fetch){
     let claimed;try{claimed=queue.claim(id,execution);}catch{return reply(res,409,{ok:false,reason:'held'});}
     if(claimed.state==='completed')return reply(res,200,{ok:true,duplicate:true,record_id:id,execution:claimed.execution});
     try{
+      if(observer){
+        const permitted=observer.epoch===claimed.epoch&&(!observer.fixtureOnly||observer.records.includes(id));
+        const outgoing=outgoingReceipt(claimed.raw,config.instance);
+        if(outgoing&&!permitted&&!observer.fixtureOnly)throw Error('receipt_epoch_closed');
+        if(permitted&&outgoing)await observe(id);
+        if(observer.fixtureOnly){
+          queue.finish(id,execution,true,'retained');
+          return reply(res,200,{ok:true,record_id:id,execution,status:'retained'});
+        }
+      }
       if(customer?.fixtureOnly&&!customer.owns(id,claimed.epoch)){
         queue.finish(id,execution,true,'retained');
         return reply(res,200,{ok:true,record_id:id,execution,status:'retained'});
