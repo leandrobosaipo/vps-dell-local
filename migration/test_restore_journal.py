@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from restore_journal import restore, sha
+from review_journal import index_review
 
 
 def encoded(raw):
@@ -52,6 +53,12 @@ class RestoreTest(unittest.TestCase):
             return restore(self.root,dict(sources=[first,second]),'fixture')
         initial = self.source(self.first,[a]),self.source(self.first,[n])
         apply(*initial)
+        review={'recordId':a['file'][:-5],'index':0,'id':sha(b'id'),'chat':sha(b'chat'),
+                'reason':'no_later_outbound_observed','type':'conversation','time':1000,'direction':'in'}
+        path=self.root/'retidos.sqlite3'
+        self.assertEqual(index_review(path,self.first,[review])['indexed'],1)
+        self.assertEqual(index_review(path,self.first,[review])['actions'],0)
+        with self.assertRaises(ValueError):index_review(path,self.first,[dict(review,reason='quoted_reply_observed')])
         apply(*initial)
         apply(self.source(self.second,[a,b]),self.source(self.second,[n]))
         for sources in (initial,(self.source(self.second,[a]),self.source(self.second,[n])),
