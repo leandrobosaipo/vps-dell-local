@@ -47,8 +47,10 @@ function customerOwner(route,tokens){
   assert(Array.isArray(route.fixtureRecords)&&route.fixtureRecords.length>0&&
     route.fixtureRecords.every(id=>typeof id==='string'&&/^[0-9a-f]{64}$/.test(id))&&
     new Set(route.fixtureRecords).size===route.fixtureRecords.length);
+  assert(route.fixtureOnly===undefined||route.fixtureOnly===true);
   const fixtures=new Set(route.fixtureRecords);
-  return {url:url.href,token:route.token,epoch:route.epoch,select(raw,id,epoch,instance){
+  return {url:url.href,token:route.token,epoch:route.epoch,fixtureOnly:route.fixtureOnly===true,
+    owns:(id,epoch)=>epoch===route.epoch&&fixtures.has(id),select(raw,id,epoch,instance){
     if(epoch!==route.epoch||!fixtures.has(id))return false;
     const body=JSON.parse(raw),key=body?.data?.key;
     return body?.instance===instance&&String(body.event).toLowerCase().replaceAll('_','.')==='messages.upsert'&&
@@ -75,6 +77,7 @@ export function createReceiveService(config,route,queue,request=fetch){
   for(const token of [route.processToken,route.triggerToken,route.coreToken,config.token])assert(typeof token==='string'&&token.length>=32);
   const chat=directOwner(route.direct,[route.processToken,route.triggerToken,route.coreToken,config.token]);
   const customer=customerOwner(route.customer,[route.processToken,route.triggerToken,route.coreToken,config.token,chat?.token]);
+  assert(!customer?.fixtureOnly||!chat);
   let waking=false,recoveryCursor=0;
   async function wake(limit){
     if(waking)return 0;
@@ -115,6 +118,14 @@ export function createReceiveService(config,route,queue,request=fetch){
     let claimed;try{claimed=queue.claim(id,execution);}catch{return reply(res,409,{ok:false,reason:'held'});}
     if(claimed.state==='completed')return reply(res,200,{ok:true,duplicate:true,record_id:id,execution:claimed.execution});
     try{
+      if(customer?.fixtureOnly&&!customer.owns(id,claimed.epoch)){
+        queue.finish(id,execution,true,'retained');
+        return reply(res,200,{ok:true,record_id:id,execution,status:'retained'});
+      }
+      if(customer?.owns(id,claimed.epoch)&&!customer.select(claimed.raw,id,claimed.epoch,config.instance)){
+        queue.finish(id,execution,true,'retained');
+        return reply(res,200,{ok:true,record_id:id,execution,status:'retained'});
+      }
       const owner=chat?.select(claimed.raw,claimed.epoch,config.instance)?chat:
         customer?.select(claimed.raw,id,claimed.epoch,config.instance)?customer:null;
       const result=await request(owner?.url||core.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(owner?125000:20000),

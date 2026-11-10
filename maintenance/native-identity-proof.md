@@ -4,4 +4,6 @@
 
 O receptor `receive_service.mjs` mantém uma seleção opcional `route.customer` com URL privada fixa `http://<IPv4 interno>:19736/channel-inbound`, token exclusivo, epoch e `fixtureRecords` explícitos. Só registros da allowlist, do epoch ativo e já autenticados por `ReceiveQueue.claim` passam a esse dono. O body é o mesmo `raw` AEAD; headers incluem record ID, epoch, workflow e execução n8n. O recibo precisa ecoar ID/workflow/execução e status `processed` ou `retained` antes de a queue concluir. Os demais registros seguem o dono existente. Não há novo webhook público nem operação de envio.
 
+Na cópia fechada de ensaio, `fixtureOnly:true` impede a consulta do core real: qualquer registro fora da allowlist ou evento incompatível conclui como `retained` na queue local, sem chamada HTTP de negócio. Não use esse modo para processar clientes reais.
+
 Modo atual: o helper é puro e a rota fica desabilitada se `route.customer` estiver ausente. A leitura privilegiada por registro, a escrita atômica do arquivo privado e a troca de versão no Dell ainda dependem de executor com acesso já existente. A allowlist de fixtures impede que uma nova identidade real seja materializada na conta de laboratório. O corte geral exigiria fonte oficial de diretório e lookup individual, política de pausa e prova separada antes de retirar essa allowlist.

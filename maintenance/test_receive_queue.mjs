@@ -83,7 +83,7 @@ test('one authenticated claim routes only enumerated customer fixture records',a
   const token=()=>randomBytes(32).toString('hex');
   const route={workflowId:'abcdefgh',webhook:'http://clock:5678/webhook/authorized-trigger',
     core:'http://jp-core-transacional-dell:8791/api/n8n/inbound',coreToken:token(),processToken:token(),triggerToken:token(),
-    customer:{url:'http://172.18.0.1:19736/channel-inbound',token:token(),epoch,fixtureRecords:[id(raw)]}};
+    customer:{url:'http://172.18.0.1:19736/channel-inbound',token:token(),epoch,fixtureRecords:[id(raw)],fixtureOnly:true}};
   assert.throws(()=>createReceiveService(c,{...route,customer:{...route.customer,url:'https://external.invalid'}},q));
   const calls=[];
   async function consume(url,opt){
@@ -104,7 +104,7 @@ test('one authenticated claim routes only enumerated customer fixture records',a
   assert.equal(calls[0].headers['X-JP-Owner-Epoch'],epoch);
   assert.equal(calls[0].headers['X-JP-Record-ID'],id(raw));
   assert.deepEqual(calls[0].body,raw);
-  assert.equal(calls[1].url,route.core);
+  assert.equal(calls.length,1);
   assert.equal(q.status(id(raw)).state,'completed');
   assert.equal(q.status(id(other)).state,'completed');
 });
