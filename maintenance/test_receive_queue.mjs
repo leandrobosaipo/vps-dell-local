@@ -91,6 +91,45 @@ test('only a direct identity assigned to the current epoch goes to the chat cons
   }
   assert.equal(calls.length,4);
 });
+test('direct business replies require identity readback and issue exactly one call to the original core',async t=>{
+  const {queue:q,config:c,id,append}=setup(t),epoch=randomUUID(),token=()=>randomBytes(32).toString('hex');
+  const route={workflowId:'abcdefgh',webhook:'http://clock:5678/webhook/authorized-trigger',
+    core:'http://jp-core-transacional-dell:8791/api/n8n/inbound',coreToken:token(),processToken:token(),triggerToken:token(),
+    customer:{url:'http://172.18.0.1:19736/channel-inbound',token:token(),epoch,claimedDirect:true},nativeBusinessControls:true,
+    businessCore:{url:'http://jp-core-operacional:8791/api/n8n/inbound',token:token(),node:'node-inbound'}};
+  const jid='5511960000001@s.whatsapp.net';const calls=[];
+  const downstream=async(url,opt)=>{
+    calls.push(url);const event=JSON.parse(opt.body),mode=event.data.mode;
+    const result={ok:true,record_id:id(opt.body),execution:'71',workflow:route.workflowId,status:'retained'};
+    if(url.endsWith('/business-preflight')&&mode!=='paused'){
+      result.status='business_ready';result.record_epoch=epoch;result.recipient=mode==='conflict'?'5511960000002@s.whatsapp.net':jid;
+    }else if(url===route.businessCore.url){
+      assert.equal(opt.headers.Authorization,'Bearer '+route.businessCore.token);
+      assert.equal(opt.headers['X-JP-Node-ID'],route.businessCore.node);
+      if(mode==='unknown')throw Error('response_lost');
+    }
+    return Response.json(result);
+  };
+  const service=http.createServer(createReceiveService(c,route,q,downstream,undefined,()=>({intent:'confirmed',phone:jid.split('@')[0]})));
+  await new Promise(resolve=>service.listen(0,'127.0.0.1',resolve));t.after(()=>{service.closeAllConnections();service.close();});
+  q.changeOwner('',epoch);
+  for(const [mode,code,expectedCalls] of [['matched',200,2],['paused',200,1],['conflict',503,1],['unknown',503,2]]){
+    const packet=Buffer.from(JSON.stringify({instance:'fixture',event:'messages.upsert',data:{mode,key:{id:'NATIVE'+mode,remoteJid:jid,fromMe:false},message:{conversation:'ok'}}}));
+    append(packet);calls.length=0;
+    const send=()=>fetch('http://127.0.0.1:'+service.address().port+'/process',{method:'POST',headers:{
+      Authorization:'Bearer '+route.processToken,'X-JP-n8n-workflow-id':route.workflowId,'X-JP-n8n-execution-id':'71'},body:JSON.stringify({record_id:id(packet)})});
+    assert.equal((await send()).status,code);await send();
+    assert.equal(calls.length,expectedCalls);assert.match(calls[0],/\/business-preflight$/);
+    if(expectedCalls===2)assert.equal(calls[1],route.businessCore.url);
+  }
+  for(const [event,jid,fromMe] of [['messages.upsert','12000000000@g.us',false],['messages.update','5511960000001@s.whatsapp.net',true]]){
+    const raw=Buffer.from(JSON.stringify({instance:'fixture',event,data:{key:{remoteJid:jid,id:'FIXTURE-'+event,fromMe}}}));
+    append(raw);calls.length=0;
+    const response=await fetch('http://127.0.0.1:'+service.address().port+'/process',{method:'POST',headers:{
+      Authorization:'Bearer '+route.processToken,'X-JP-n8n-workflow-id':route.workflowId,'X-JP-n8n-execution-id':'71'},body:JSON.stringify({record_id:id(raw)})});
+    assert.equal(response.status,200);assert.deepEqual(calls,[route.businessCore.url]);
+  }
+});
 test('current owner routes unseen direct inputs, retains stale or ambiguous direct claims',async t=>{
   const {queue:q,config:c,id,append}=setup(t),epoch=randomUUID(),token=()=>randomBytes(32).toString('hex');
   const route={workflowId:'abcdefgh',webhook:'http://clock:5678/webhook/authorized-trigger',
@@ -118,6 +157,30 @@ test('current owner routes unseen direct inputs, retains stale or ambiguous dire
   q.changeOwner(epoch,'');q.changeOwner('',randomUUID());
   await process(body('100000003@lid'));
   assert.deepEqual(calls,[route.customer.url,route.customer.url,route.core]);
+});
+test('public reply receipts are owned by the sender ledger and legacy receipts still reach the core',async t=>{
+  const {queue:q,config:c,id,append}=setup(t),epoch=randomUUID(),token=()=>randomBytes(32).toString('hex');
+  const route={workflowId:'abcdefgh',webhook:'http://clock:5678/webhook/authorized-trigger',
+    core:'http://jp-core-transacional-dell:8791/api/n8n/inbound',coreToken:token(),processToken:token(),triggerToken:token(),
+    customer:{url:'http://172.18.0.1:19736/channel-inbound',token:token(),epoch,claimedDirect:true},
+    receiptObserver:{epoch,fixtureOnly:false,resume:true}};
+  let owns=true, calls=0;
+  const downstream=async(url,opt)=>{assert.equal(url,route.core);calls++;
+    return Response.json({ok:true,record_id:id(opt.body),workflow:route.workflowId,execution:'91',status:'retained'});};
+  const observer=async()=>({matched:1,confirmed:1,waiting:0,public_reply_receipt:owns});
+  const service=http.createServer(createReceiveService(c,route,q,downstream,observer));
+  await new Promise(r=>service.listen(0,'127.0.0.1',r));
+  t.after(()=>{service.closeAllConnections();service.close();});q.changeOwner('',epoch);
+  for(const publicPart of [true,false]){
+    owns=publicPart;
+    const b=Buffer.from(JSON.stringify({instance:'fixture',event:'messages.update',data:{keyId:'R'+owns,fromMe:true}}));
+    append(b);
+    const reply=await fetch('http://127.0.0.1:'+service.address().port+'/process',{method:'POST',headers:{
+      Authorization:'Bearer '+route.processToken,'X-JP-n8n-workflow-id':route.workflowId,'X-JP-n8n-execution-id':'91'},
+      body:JSON.stringify({record_id:id(b)})});
+    assert.equal(reply.status,200);assert.equal((await reply.json()).resume_pending,true);
+    assert.equal(calls,owns?0:1);
+  }
 });
 test('one authenticated claim routes only enumerated customer fixture records',async t=>{
   const {queue:q,config:c,id,append}=setup(t),epoch=randomUUID();

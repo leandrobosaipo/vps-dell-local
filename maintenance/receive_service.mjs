@@ -119,7 +119,7 @@ function outgoingReceipt(raw, instance){
   return rows.some(row=>(row?.fromMe??row?.key?.fromMe)===true);
 }
 
-export function createReceiveService(config,route,queue,request=fetch,observe=observeDispatchRecord){
+export function createReceiveService(config,route,queue,request=fetch,observe=observeDispatchRecord,parseBusiness=null){
   // The incoming JSON cannot choose an upstream, a recipient or a credential.
   const workflow=new URL(route.webhook), core=new URL(route.core);
   assert.equal(workflow.origin,'http://clock:5678');
@@ -131,6 +131,13 @@ export function createReceiveService(config,route,queue,request=fetch,observe=ob
   const chat=directOwner(route.direct,[route.processToken,route.triggerToken,route.coreToken,config.token]);
   const customer=customerOwner(route.customer,[route.processToken,route.triggerToken,route.coreToken,config.token,chat?.token]);
   assert(!(customer?.fixtureOnly||customer?.claimedDirect)||!chat);
+  if(route.nativeBusinessControls){
+    assert(customer?.claimedDirect&&typeof parseBusiness==='function');
+    const business=route.businessCore;
+    assert(business?.url==='http://jp-core-operacional:8791/api/n8n/inbound' && typeof business.token==='string' && business.token.length>=32 &&
+      ![config.token,route.processToken,route.triggerToken,route.coreToken,customer.token].includes(business.token) &&
+      /^[A-Za-z0-9_-]{6,80}$/.test(business.node));
+  }
   const observer=route.receiptObserver;
   if(observer){
     assert(/^[a-f0-9-]{36}$/.test(observer.epoch)&&typeof observer.fixtureOnly==='boolean');
@@ -210,6 +217,10 @@ export function createReceiveService(config,route,queue,request=fetch,observe=ob
         if(permitted&&outgoing){
           const result=await observe(id);
           confirmed=observer.resume===true&&result.confirmed>0;
+          if(customer?.claimedDirect && result.public_reply_receipt===true && result.matched===1){
+            queue.finish(id,execution,true,confirmed?'confirmed_receipt':'processed');
+            return reply(res,200,{ok:true,record_id:id,execution,status:'processed',resume_pending:confirmed});
+          }
         }
         if(observer.fixtureOnly){
           queue.finish(id,execution,true,confirmed?'confirmed_receipt':'retained');
@@ -225,11 +236,37 @@ export function createReceiveService(config,route,queue,request=fetch,observe=ob
         queue.finish(id,execution,true,'retained');
         return reply(res,200,{ok:true,record_id:id,execution,status:'retained'});
       }
-      const owner=chat?.select(claimed.raw,claimed.epoch,config.instance)?chat:
+      let owner=chat?.select(claimed.raw,claimed.epoch,config.instance)?chat:
         customer?.select(claimed.raw,id,claimed.epoch,config.instance)?customer:null;
+      if(owner===customer && customer && route.nativeBusinessControls){
+        const inbound=parseBusiness(JSON.parse(claimed.raw),config.instance);
+        if(inbound && (inbound.quoted_message_id || ['confirmed','opt_out'].includes(inbound.intent))){
+          const check=await request(new URL('/business-preflight',customer.url).href,{method:'POST',redirect:'error',
+            signal:AbortSignal.timeout(125000),headers:{'Content-Type':'application/json',Authorization:'Bearer '+customer.token,
+              'X-JP-Owner-Epoch':claimed.epoch,'X-JP-Control-Intent':['confirmed','opt_out'].includes(inbound.intent)?inbound.intent:'quoted',
+              'X-JP-n8n-workflow-id':workflowId,'X-JP-n8n-execution-id':execution,'X-JP-Record-ID':id},body:claimed.raw});
+          const proof=await check.json();
+          assert(check.ok && proof.ok===true && proof.record_id===id && proof.execution===execution && proof.workflow===workflowId);
+          if(proof.status==='retained'){
+            queue.finish(id,execution,true,'retained');
+            return reply(res,200,{ok:true,record_id:id,execution,status:'retained',resume_pending:false});
+          }
+          assert(proof.status==='business_ready' && proof.recipient===inbound.phone+'@s.whatsapp.net' &&
+            proof.record_epoch===claimed.epoch && queue.owner().epoch===claimed.epoch && queue.status(id).state==='claimed');
+          // Exactly one business consumer, with the unchanged provider envelope. Its
+          // existing visit, opt-out and permission checks own any resulting effect.
+          owner=route.businessCore;
+        }
+      }
+      // Group events and unmatched provider receipts belong to the scheduler's ledger too.
+      if(!owner && route.nativeBusinessControls){
+        assert(queue.owner().epoch===claimed.epoch && queue.status(id).state==='claimed');
+        owner=route.businessCore;
+      }
       const result=await request(owner?.url||core.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(owner?125000:20000),
         headers:{'Content-Type':'application/json',Authorization:'Bearer '+(owner?.token||route.coreToken),
           ...(owner?{'X-JP-Owner-Epoch':claimed.epoch}:{}),
+          ...(owner===route.businessCore && owner?{'X-JP-Node-ID':owner.node}:{}),
           'X-JP-n8n-workflow-id':workflowId,'X-JP-n8n-execution-id':execution,'X-JP-Record-ID':id},
         body:claimed.raw});
       const data=await result.json();
@@ -252,7 +289,17 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
     source:'evolution',minFreeBytes:512*1024*1024});
   const route=JSON.parse(fs.readFileSync('/access/route.json'));
   const queue=new ReceiveQueue('/data/index',config.dir,config.key,config.instance);
-  const service=createReceiveService(config,route,queue);
+  let parseBusiness=null;
+  if(route.nativeBusinessControls){
+    const contract=await import('/contract/jp-followup-core.mjs');
+    parseBusiness=(event,instance)=>{
+      const native=contract.parseEvolutionInbound(event,instance);
+      if(native)return native;
+      const content=contract.extractEvolutionContent(event.data?.message);
+      return {intent:content.original_intent||contract.responseIntent(content.text),quoted_message_id:content.quoted_message_id,phone:null};
+    };
+  }
+  const service=createReceiveService(config,route,queue,fetch,observeDispatchRecord,parseBusiness);
   const handler=(req,res)=>service(req,res).catch(()=>reply(res,503,{ok:false}));
   http.createServer(handler).listen(8787,'0.0.0.0');
   if(route.publicIntake===true)http.createServer(intakeOnly(handler)).listen(8790,'0.0.0.0');
