@@ -131,7 +131,13 @@ export function createReceiveService(config,route,queue,request=fetch,observe=ob
   const chat=directOwner(route.direct,[route.processToken,route.triggerToken,route.coreToken,config.token]);
   const customer=customerOwner(route.customer,[route.processToken,route.triggerToken,route.coreToken,config.token,chat?.token]);
   assert(!(customer?.fixtureOnly||customer?.claimedDirect)||!chat);
-  if(route.nativeBusinessControls)assert(customer?.claimedDirect&&typeof parseBusiness==='function');
+  if(route.nativeBusinessControls){
+    assert(customer?.claimedDirect&&typeof parseBusiness==='function');
+    const business=route.businessCore;
+    assert(business?.url==='http://jp-core-operacional:8791/api/n8n/inbound' && typeof business.token==='string' && business.token.length>=32 &&
+      ![config.token,route.processToken,route.triggerToken,route.coreToken,customer.token].includes(business.token) &&
+      /^[A-Za-z0-9_-]{6,80}$/.test(business.node));
+  }
   const observer=route.receiptObserver;
   if(observer){
     assert(/^[a-f0-9-]{36}$/.test(observer.epoch)&&typeof observer.fixtureOnly==='boolean');
@@ -249,12 +255,13 @@ export function createReceiveService(config,route,queue,request=fetch,observe=ob
             proof.record_epoch===claimed.epoch && queue.owner().epoch===claimed.epoch && queue.status(id).state==='claimed');
           // Exactly one business consumer, with the unchanged provider envelope. Its
           // existing visit, opt-out and permission checks own any resulting effect.
-          owner=null;
+          owner=route.businessCore;
         }
       }
       const result=await request(owner?.url||core.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(owner?125000:20000),
         headers:{'Content-Type':'application/json',Authorization:'Bearer '+(owner?.token||route.coreToken),
           ...(owner?{'X-JP-Owner-Epoch':claimed.epoch}:{}),
+          ...(owner===route.businessCore && owner?{'X-JP-Node-ID':owner.node}:{}),
           'X-JP-n8n-workflow-id':workflowId,'X-JP-n8n-execution-id':execution,'X-JP-Record-ID':id},
         body:claimed.raw});
       const data=await result.json();

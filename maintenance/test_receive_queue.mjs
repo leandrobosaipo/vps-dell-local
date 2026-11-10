@@ -95,14 +95,19 @@ test('direct business replies require identity readback and issue exactly one ca
   const {queue:q,config:c,id,append}=setup(t),epoch=randomUUID(),token=()=>randomBytes(32).toString('hex');
   const route={workflowId:'abcdefgh',webhook:'http://clock:5678/webhook/authorized-trigger',
     core:'http://jp-core-transacional-dell:8791/api/n8n/inbound',coreToken:token(),processToken:token(),triggerToken:token(),
-    customer:{url:'http://172.18.0.1:19736/channel-inbound',token:token(),epoch,claimedDirect:true},nativeBusinessControls:true};
+    customer:{url:'http://172.18.0.1:19736/channel-inbound',token:token(),epoch,claimedDirect:true},nativeBusinessControls:true,
+    businessCore:{url:'http://jp-core-operacional:8791/api/n8n/inbound',token:token(),node:'node-inbound'}};
   const jid='5511960000001@s.whatsapp.net';const calls=[];
   const downstream=async(url,opt)=>{
     calls.push(url);const event=JSON.parse(opt.body),mode=event.data.mode;
     const result={ok:true,record_id:id(opt.body),execution:'71',workflow:route.workflowId,status:'retained'};
     if(url.endsWith('/business-preflight')&&mode!=='paused'){
       result.status='business_ready';result.record_epoch=epoch;result.recipient=mode==='conflict'?'5511960000002@s.whatsapp.net':jid;
-    }else if(url===route.core && mode==='unknown')throw Error('response_lost');
+    }else if(url===route.businessCore.url){
+      assert.equal(opt.headers.Authorization,'Bearer '+route.businessCore.token);
+      assert.equal(opt.headers['X-JP-Node-ID'],route.businessCore.node);
+      if(mode==='unknown')throw Error('response_lost');
+    }
     return Response.json(result);
   };
   const service=http.createServer(createReceiveService(c,route,q,downstream,undefined,()=>({intent:'confirmed',phone:jid.split('@')[0]})));
@@ -115,7 +120,7 @@ test('direct business replies require identity readback and issue exactly one ca
       Authorization:'Bearer '+route.processToken,'X-JP-n8n-workflow-id':route.workflowId,'X-JP-n8n-execution-id':'71'},body:JSON.stringify({record_id:id(packet)})});
     assert.equal((await send()).status,code);await send();
     assert.equal(calls.length,expectedCalls);assert.match(calls[0],/\/business-preflight$/);
-    if(expectedCalls===2)assert.equal(calls[1],route.core);
+    if(expectedCalls===2)assert.equal(calls[1],route.businessCore.url);
   }
 });
 test('current owner routes unseen direct inputs, retains stale or ambiguous direct claims',async t=>{
