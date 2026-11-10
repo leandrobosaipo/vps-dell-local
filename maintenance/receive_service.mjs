@@ -37,6 +37,26 @@ function directOwner(route,tokens){
     return senders.has(createHash('sha256').update(instance).update(Buffer.from([0])).update(key.remoteJid).digest('hex'));
   }};
 }
+function customerOwner(route,tokens){
+  if(!route)return null;
+  const url=new URL(route.url);
+  assert(isIPv4(url.hostname)&&/^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(url.hostname));
+  assert.equal(url.href,'http://'+url.hostname+':19736/channel-inbound');
+  assert(typeof route.token==='string'&&route.token.length>=32&&!tokens.includes(route.token));
+  assert(/^[a-f0-9-]{36}$/.test(route.epoch));
+  assert(Array.isArray(route.fixtureRecords)&&route.fixtureRecords.length>0&&
+    route.fixtureRecords.every(id=>typeof id==='string'&&/^[0-9a-f]{64}$/.test(id))&&
+    new Set(route.fixtureRecords).size===route.fixtureRecords.length);
+  const fixtures=new Set(route.fixtureRecords);
+  return {url:url.href,token:route.token,epoch:route.epoch,select(raw,id,epoch,instance){
+    if(epoch!==route.epoch||!fixtures.has(id))return false;
+    const body=JSON.parse(raw),key=body?.data?.key;
+    return body?.instance===instance&&String(body.event).toLowerCase().replaceAll('_','.')==='messages.upsert'&&
+      key?.fromMe===false&&typeof key.id==='string'&&/^[A-Za-z0-9_-]{6,160}$/.test(key.id)&&
+      typeof key.remoteJid==='string'&&/^\d{6,20}@(lid|s\.whatsapp\.net)$/.test(key.remoteJid)&&
+      !key.participant&&!key.participantAlt;
+  }};
+}
 async function readId(req){
   let bytes=0;const chunks=[];
   for await(const chunk of req){bytes+=chunk.length;assert(bytes<=256);chunks.push(chunk);}
@@ -54,6 +74,7 @@ export function createReceiveService(config,route,queue,request=fetch){
   assert(new Set([route.processToken,route.triggerToken,route.coreToken,config.token]).size===4);
   for(const token of [route.processToken,route.triggerToken,route.coreToken,config.token])assert(typeof token==='string'&&token.length>=32);
   const chat=directOwner(route.direct,[route.processToken,route.triggerToken,route.coreToken,config.token]);
+  const customer=customerOwner(route.customer,[route.processToken,route.triggerToken,route.coreToken,config.token,chat?.token]);
   let waking=false,recoveryCursor=0;
   async function wake(limit){
     if(waking)return 0;
@@ -65,7 +86,7 @@ export function createReceiveService(config,route,queue,request=fetch){
         // If n8n disappears before claiming, the record stays ready for the next n8n drain.
         // A claim without a final receipt stays claimed for reconciliation by that ID.
         try{
-          const res=await request(workflow.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(chat?140000:15000),
+          const res=await request(workflow.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(chat||customer?140000:15000),
             headers:{'Content-Type':'application/json',Authorization:'Bearer '+route.triggerToken},body:JSON.stringify({record_id:id})});
           await res.body?.cancel();
           if(!res.ok)break;
@@ -94,10 +115,11 @@ export function createReceiveService(config,route,queue,request=fetch){
     let claimed;try{claimed=queue.claim(id,execution);}catch{return reply(res,409,{ok:false,reason:'held'});}
     if(claimed.state==='completed')return reply(res,200,{ok:true,duplicate:true,record_id:id,execution:claimed.execution});
     try{
-      const mapped=chat?.select(claimed.raw,claimed.epoch,config.instance);
-      const result=await request(mapped?chat.url:core.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(mapped?125000:20000),
-        headers:{'Content-Type':'application/json',Authorization:'Bearer '+(mapped?chat.token:route.coreToken),
-          ...(mapped?{'X-JP-Owner-Epoch':claimed.epoch}:{}),
+      const owner=chat?.select(claimed.raw,claimed.epoch,config.instance)?chat:
+        customer?.select(claimed.raw,id,claimed.epoch,config.instance)?customer:null;
+      const result=await request(owner?.url||core.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(owner?125000:20000),
+        headers:{'Content-Type':'application/json',Authorization:'Bearer '+(owner?.token||route.coreToken),
+          ...(owner?{'X-JP-Owner-Epoch':claimed.epoch}:{}),
           'X-JP-n8n-workflow-id':workflowId,'X-JP-n8n-execution-id':execution,'X-JP-Record-ID':id},
         body:claimed.raw});
       const data=await result.json();
