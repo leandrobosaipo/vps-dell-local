@@ -30,6 +30,23 @@ test('the external listener serves only the two intake operations',async t=>{
   }
   assert.deepEqual(calls,['/healthz','/inbound']);
 });
+test('continuation survives a missed n8n step, retains uncertain calls and cannot cross epochs',t=>{
+  const {queue:q,config:c,raw,id,append}=setup(t);
+  const first=raw(51),second=raw(52),epoch=randomUUID();
+  q.changeOwner('',epoch);
+  for(const b of [first,second]){
+    append(b);q.claim(id(b),'51');q.finish(id(b),'51',true,'confirmed_receipt');
+  }
+  assert.deepEqual(q.readyContinuations(2),[id(first),id(second)]);
+  assert.equal(q.startContinuation(id(first),epoch,'52'),'claimed');
+  assert.throws(()=>q.startContinuation(id(first),epoch,'53'));
+  q.finishContinuation(id(first),'52','delivery_unknown');
+  assert.equal(q.startContinuation(id(first),epoch,'54'),'delivery_unknown');
+  assert.deepEqual(q.readyContinuations(2),[id(second)]);
+  q.changeOwner(epoch,'');q.changeOwner('',randomUUID());
+  assert.deepEqual(q.readyContinuations(2),[]);
+  assert.throws(()=>q.startContinuation(id(second),epoch,'55'));
+});
 test('the first observation owns eligibility across retries, cut and return',t=>{
   const {queue:q,config:c,raw,id,append}=setup(t);
   const [a,b,d,e]=[1,2,3,4].map(raw);

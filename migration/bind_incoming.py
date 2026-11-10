@@ -1,7 +1,32 @@
 """Bind the four cloned inbound nodes to the Dell queue without changing the graph topology."""
 import copy
 import re
+import uuid
 from urllib.parse import urlsplit
+
+
+def with_receipt_resume(graph):
+    """Add the private n8n continuation stage to an already bound four-node candidate."""
+    if graph.get('active') or len(graph['nodes'])!=4:raise ValueError('expected_inactive_four_node_inbound')
+    bound=copy.deepcopy(graph)
+    process,=[n for n in bound['nodes'] if n['type']=='n8n-nodes-base.httpRequest']
+    params=process['parameters']
+    origin=urlsplit(params['url'])
+    if origin.scheme!='http' or origin.port!=8787 or not re.fullmatch(r'jp-[a-z0-9-]+',origin.hostname or '') or origin.path!='/process' or origin.query or origin.fragment or origin.username or origin.password:
+        raise ValueError('unexpected_process_target')
+    if params['method']!='POST' or set(process['credentials'])!={'httpHeaderAuth'}:raise ValueError('unbound_consumer')
+    edges=bound['connections'][process['name']]['main']
+    if len(edges)!=2 or any(len(branch)!=1 for branch in edges):raise ValueError('unexpected_process_edges')
+    stage=copy.deepcopy(process)
+    stage['id']=str(uuid.uuid5(uuid.NAMESPACE_URL,process['id']+'/receipt-resume'))
+    stage['name']='Retomar arte após recibo e conferir pausa humana'
+    stage['position']=[process['position'][0]+210,process['position'][1]]
+    stage['parameters']['url']=origin._replace(path='/resume').geturl()
+    stage['parameters']['jsonBody']='={{ {record_id:$json.record_id} }}'
+    stage['retryOnFail']=False
+    bound['nodes'].append(stage);bound['connections'][stage['name']]={'main':copy.deepcopy(edges)}
+    edges[0]=[{'node':stage['name'],'type':'main','index':0}]
+    return bound
 
 
 def bind_incoming(row, trigger, consumer, hook):

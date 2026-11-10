@@ -23,7 +23,10 @@ export class ReceiveQueue {
       CREATE TABLE IF NOT EXISTS receipts(seq INTEGER PRIMARY KEY,id TEXT NOT NULL UNIQUE,epoch TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('reserved','retained','ready','claimed','completed','uncertain')),
         execution TEXT, outcome TEXT, at TEXT NOT NULL);
-      CREATE INDEX IF NOT EXISTS receipts_state_seq ON receipts(state,seq);`);
+      CREATE INDEX IF NOT EXISTS receipts_state_seq ON receipts(state,seq);
+      CREATE TABLE IF NOT EXISTS continuations(id TEXT PRIMARY KEY,epoch TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('ready','claimed','done','held')),execution TEXT,outcome TEXT);
+      CREATE INDEX IF NOT EXISTS continuation_ready ON continuations(epoch,state);`);
   }
   tx(fn) {
     this.db.exec('BEGIN IMMEDIATE');
@@ -37,10 +40,12 @@ export class ReceiveQueue {
       assert.equal(this.owner().epoch,expected);
       assert(expected!==epoch&&!(expected&&epoch),'close_previous_epoch_first');
       if(epoch){
+        assert(!this.db.prepare("SELECT 1 FROM continuations WHERE state='claimed' LIMIT 1").get(),'continuation_in_flight');
         assert(!this.db.prepare("SELECT 1 FROM receipts WHERE state='claimed' LIMIT 1").get(),'previous_execution_in_flight');
         this.db.prepare('INSERT INTO epochs VALUES(?)').run(epoch);
       }
       if(expected){
+        this.db.prepare("UPDATE continuations SET state='held',outcome='epoch_closed' WHERE epoch=? AND state='ready'").run(expected);
         this.db.prepare("UPDATE receipts SET state='retained' WHERE epoch=? AND state='ready'").run(expected);
       }
       this.db.prepare('UPDATE owner SET epoch=?,fixture=? WHERE slot=1').run(epoch,fixture);
@@ -107,8 +112,32 @@ export class ReceiveQueue {
   finish(id,execution,ok,outcome) {
     assert(validId(id)&&typeof ok==='boolean');
     assert(typeof outcome==='string'&&/^[a-z_]{1,64}$/.test(outcome));
-    assert.equal(this.db.prepare("UPDATE receipts SET state=?,outcome=? WHERE id=? AND execution=? AND state='claimed'").run(
-      ok?'completed':'uncertain',JSON.stringify(outcome),id,execution).changes,1,'claim_mismatch');
+    this.tx(()=>{
+      assert.equal(this.db.prepare("UPDATE receipts SET state=?,outcome=? WHERE id=? AND execution=? AND state='claimed'").run(
+        ok?'completed':'uncertain',JSON.stringify(outcome),id,execution).changes,1,'claim_mismatch');
+      if(ok&&outcome==='confirmed_receipt'){
+        const epoch=this.status(id).epoch;
+        this.db.prepare('INSERT INTO continuations VALUES(?,?,?,NULL,NULL)').run(id,epoch,
+          this.owner().epoch===epoch?'ready':'held');
+      }
+    });
+  }
+  readyContinuations(limit){return this.db.prepare("SELECT id FROM continuations WHERE epoch=? AND state='ready' ORDER BY rowid LIMIT ?").all(this.owner().epoch,limit).map(r=>r.id);}
+  startContinuation(id,epoch,execution){
+    return this.tx(()=>{
+      assert(epoch&&this.owner().epoch===epoch);
+      const row=this.db.prepare('SELECT * FROM continuations WHERE id=? AND epoch=?').get(id,epoch);
+      if(!row)return 'no_continuation';
+      if(row.state==='done'||row.state==='held')return row.outcome||'held';
+      assert.equal(row.state,'ready','continuation_in_flight');
+      this.db.prepare("UPDATE continuations SET state='claimed',execution=? WHERE id=?").run(execution,id);
+      return 'claimed';
+    });
+  }
+  finishContinuation(id,execution,outcome){
+    assert(['no_continuation','human','accepted','delivery_unknown','held'].includes(outcome));
+    assert.equal(this.db.prepare("UPDATE continuations SET state=?,outcome=? WHERE id=? AND execution=? AND state='claimed'").run(
+      ['held','human','delivery_unknown'].includes(outcome)?'held':'done',outcome,id,execution).changes,1);
   }
   health(){return {lastSequence:this.db.prepare('SELECT COALESCE(max(seq),0) AS n FROM receipts').get().n};}
   close(){this.db.close();}
