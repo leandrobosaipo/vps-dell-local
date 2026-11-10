@@ -210,6 +210,10 @@ export function createReceiveService(config,route,queue,request=fetch,observe=ob
         if(permitted&&outgoing){
           const result=await observe(id);
           confirmed=observer.resume===true&&result.confirmed>0;
+          if(customer?.claimedDirect && result.public_reply_receipt===true && result.matched===1){
+            queue.finish(id,execution,true,confirmed?'confirmed_receipt':'processed');
+            return reply(res,200,{ok:true,record_id:id,execution,status:'processed',resume_pending:confirmed});
+          }
         }
         if(observer.fixtureOnly){
           queue.finish(id,execution,true,confirmed?'confirmed_receipt':'retained');

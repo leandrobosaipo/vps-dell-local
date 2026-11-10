@@ -119,6 +119,30 @@ test('current owner routes unseen direct inputs, retains stale or ambiguous dire
   await process(body('100000003@lid'));
   assert.deepEqual(calls,[route.customer.url,route.customer.url,route.core]);
 });
+test('public reply receipts are owned by the sender ledger and legacy receipts still reach the core',async t=>{
+  const {queue:q,config:c,id,append}=setup(t),epoch=randomUUID(),token=()=>randomBytes(32).toString('hex');
+  const route={workflowId:'abcdefgh',webhook:'http://clock:5678/webhook/authorized-trigger',
+    core:'http://jp-core-transacional-dell:8791/api/n8n/inbound',coreToken:token(),processToken:token(),triggerToken:token(),
+    customer:{url:'http://172.18.0.1:19736/channel-inbound',token:token(),epoch,claimedDirect:true},
+    receiptObserver:{epoch,fixtureOnly:false,resume:true}};
+  let owns=true, calls=0;
+  const downstream=async(url,opt)=>{assert.equal(url,route.core);calls++;
+    return Response.json({ok:true,record_id:id(opt.body),workflow:route.workflowId,execution:'91',status:'retained'});};
+  const observer=async()=>({matched:1,confirmed:1,waiting:0,public_reply_receipt:owns});
+  const service=http.createServer(createReceiveService(c,route,q,downstream,observer));
+  await new Promise(r=>service.listen(0,'127.0.0.1',r));
+  t.after(()=>{service.closeAllConnections();service.close();});q.changeOwner('',epoch);
+  for(const publicPart of [true,false]){
+    owns=publicPart;
+    const b=Buffer.from(JSON.stringify({instance:'fixture',event:'messages.update',data:{keyId:'R'+owns,fromMe:true}}));
+    append(b);
+    const reply=await fetch('http://127.0.0.1:'+service.address().port+'/process',{method:'POST',headers:{
+      Authorization:'Bearer '+route.processToken,'X-JP-n8n-workflow-id':route.workflowId,'X-JP-n8n-execution-id':'91'},
+      body:JSON.stringify({record_id:id(b)})});
+    assert.equal(reply.status,200);assert.equal((await reply.json()).resume_pending,true);
+    assert.equal(calls,owns?0:1);
+  }
+});
 test('one authenticated claim routes only enumerated customer fixture records',async t=>{
   const {queue:q,config:c,id,append}=setup(t),epoch=randomUUID();
   const raw=Buffer.from(JSON.stringify({instance:'fixture',event:'messages.upsert',data:{
