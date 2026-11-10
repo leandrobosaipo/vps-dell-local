@@ -91,6 +91,34 @@ test('only a direct identity assigned to the current epoch goes to the chat cons
   }
   assert.equal(calls.length,4);
 });
+test('current owner routes unseen direct inputs, retains stale or ambiguous direct claims',async t=>{
+  const {queue:q,config:c,id,append}=setup(t),epoch=randomUUID(),token=()=>randomBytes(32).toString('hex');
+  const route={workflowId:'abcdefgh',webhook:'http://clock:5678/webhook/authorized-trigger',
+    core:'http://jp-core-transacional-dell:8791/api/n8n/inbound',coreToken:token(),processToken:token(),triggerToken:token(),
+    customer:{url:'http://172.18.0.1:19736/channel-inbound',token:token(),epoch,claimedDirect:true}};
+  assert.throws(()=>createReceiveService(c,{...route,customer:{...route.customer,fixtureOnly:true}},q));
+  const calls=[];
+  const service=http.createServer(createReceiveService(c,route,q,async (url,opt)=>{
+    calls.push(url);
+    return Response.json({ok:true,status:'retained',record_id:id(opt.body),workflow:'abcdefgh',execution:'71'});
+  }));
+  await new Promise(r=>service.listen(0,'127.0.0.1',r));t.after(()=>{service.closeAllConnections();service.close();});
+  const body=(remoteJid,fromMe=false)=>({instance:'fixture',event:'messages.upsert',data:{key:{id:'FIXTURE001',remoteJid,fromMe}}});
+  async function process(item){
+    const b=Buffer.from(JSON.stringify(item));append(b);
+    const response=await fetch('http://127.0.0.1:'+service.address().port+'/process',{method:'POST',headers:{
+      Authorization:'Bearer '+route.processToken,'X-JP-n8n-workflow-id':route.workflowId,'X-JP-n8n-execution-id':'71'},
+      body:JSON.stringify({record_id:id(b)})});
+    assert.equal(response.status,200);
+  }
+  q.changeOwner('',epoch);
+  await process(body('100000006@lid'));await process(body('5511960000001@s.whatsapp.net'));
+  await process(body('100000002@g.us'));await process([body('100000005@lid')]);
+  await process(body('100000005@lid',null));
+  q.changeOwner(epoch,'');q.changeOwner('',randomUUID());
+  await process(body('100000003@lid'));
+  assert.deepEqual(calls,[route.customer.url,route.customer.url,route.core]);
+});
 test('one authenticated claim routes only enumerated customer fixture records',async t=>{
   const {queue:q,config:c,id,append}=setup(t),epoch=randomUUID();
   const raw=Buffer.from(JSON.stringify({instance:'fixture',event:'messages.upsert',data:{

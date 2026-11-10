@@ -44,14 +44,28 @@ function customerOwner(route,tokens){
   assert.equal(url.href,'http://'+url.hostname+':19736/channel-inbound');
   assert(typeof route.token==='string'&&route.token.length>=32&&!tokens.includes(route.token));
   assert(/^[a-f0-9-]{36}$/.test(route.epoch));
-  assert(Array.isArray(route.fixtureRecords)&&route.fixtureRecords.length>0&&
-    route.fixtureRecords.every(id=>typeof id==='string'&&/^[0-9a-f]{64}$/.test(id))&&
-    new Set(route.fixtureRecords).size===route.fixtureRecords.length);
-  assert(route.fixtureOnly===undefined||route.fixtureOnly===true);
+  const claimedDirect=route.claimedDirect===true;
+  if(claimedDirect){
+    assert(route.fixtureRecords===undefined&&route.fixtureOnly===undefined);
+  }else{
+    assert(route.claimedDirect===undefined&&Array.isArray(route.fixtureRecords)&&route.fixtureRecords.length>0&&
+      route.fixtureRecords.every(id=>typeof id==='string'&&/^[0-9a-f]{64}$/.test(id))&&
+      new Set(route.fixtureRecords).size===route.fixtureRecords.length);
+    assert(route.fixtureOnly===undefined||route.fixtureOnly===true);
+  }
   const fixtures=new Set(route.fixtureRecords);
-  return {url:url.href,token:route.token,epoch:route.epoch,fixtureOnly:route.fixtureOnly===true,
+  return {url:url.href,token:route.token,epoch:route.epoch,fixtureOnly:route.fixtureOnly===true,claimedDirect,
+    directInput(raw){
+      if(!claimedDirect)return false;
+      const body=JSON.parse(raw),items=Array.isArray(body)?body:[body];
+      return items.some(item=>{
+        const key=item?.data?.key;
+        return String(item?.event).toLowerCase().replaceAll('_','.')==='messages.upsert'&&
+          key?.fromMe!==true&&typeof key?.remoteJid==='string'&&/@(lid|s\.whatsapp\.net)$/.test(key.remoteJid);
+      });
+    },
     owns:(id,epoch)=>epoch===route.epoch&&fixtures.has(id),select(raw,id,epoch,instance){
-    if(epoch!==route.epoch||!fixtures.has(id))return false;
+    if(epoch!==route.epoch||(!claimedDirect&&!fixtures.has(id)))return false;
     const body=JSON.parse(raw),key=body?.data?.key;
     return body?.instance===instance&&String(body.event).toLowerCase().replaceAll('_','.')==='messages.upsert'&&
       key?.fromMe===false&&typeof key.id==='string'&&/^[A-Za-z0-9_-]{6,160}$/.test(key.id)&&
@@ -116,7 +130,7 @@ export function createReceiveService(config,route,queue,request=fetch,observe=ob
   for(const token of [route.processToken,route.triggerToken,route.coreToken,config.token])assert(typeof token==='string'&&token.length>=32);
   const chat=directOwner(route.direct,[route.processToken,route.triggerToken,route.coreToken,config.token]);
   const customer=customerOwner(route.customer,[route.processToken,route.triggerToken,route.coreToken,config.token,chat?.token]);
-  assert(!customer?.fixtureOnly||!chat);
+  assert(!(customer?.fixtureOnly||customer?.claimedDirect)||!chat);
   const observer=route.receiptObserver;
   if(observer){
     assert(/^[a-f0-9-]{36}$/.test(observer.epoch)&&typeof observer.fixtureOnly==='boolean');
@@ -206,7 +220,8 @@ export function createReceiveService(config,route,queue,request=fetch,observe=ob
         queue.finish(id,execution,true,'retained');
         return reply(res,200,{ok:true,record_id:id,execution,status:'retained'});
       }
-      if(customer?.owns(id,claimed.epoch)&&!customer.select(claimed.raw,id,claimed.epoch,config.instance)){
+      if((customer?.owns(id,claimed.epoch)||customer?.directInput(claimed.raw))&&
+         !customer.select(claimed.raw,id,claimed.epoch,config.instance)){
         queue.finish(id,execution,true,'retained');
         return reply(res,200,{ok:true,record_id:id,execution,status:'retained'});
       }
