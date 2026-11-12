@@ -85,10 +85,39 @@ def apply(cf, ref, state_dir, email):
     dns = cf.request(zone + "/dns_records", "POST", {
         "type": "CNAME", "name": HOST, "content": target, "proxied": True, "ttl": 1,
     })
+    save(root / "dns.json", {"id": dns["id"]})
     saved_dns = cf.request(zone + "/dns_records/" + dns["id"])
     if saved_dns.get("name") != HOST or saved_dns.get("content") != target or saved_dns.get("proxied") is not True:
         raise ValueError("dns_readback_mismatch")
     result = {"hostname": HOST, "origin": ORIGIN, "otpOnly": True, "operatorCount": 1,
               "sessionDuration": "2h", "oldRoutesPreserved": True}
     save(root / "readback.json", result)
+    return result
+
+
+def remove(cf, ref, state_dir):
+    """Remove only the console route after restoring the recorded tunnel config."""
+    root = Path(state_dir)
+    intent = __import__("json").loads((root / "intent.json").read_text())
+    app = __import__("json").loads((root / "app.json").read_text())
+    dns = __import__("json").loads((root / "dns.json").read_text())
+    if intent.get("host") != HOST or intent.get("origin") != ORIGIN or (root / "closed.json").exists():
+        raise ValueError("invalid_or_closed_state")
+    account = "accounts/" + ref["account"]
+    zone = "zones/" + ref["zone"]
+    tunnel = account + "/cfd_tunnel/" + ref["tunnelId"]
+    before = intent["before"]
+    expected = append_console(before, app["aud"])
+    if cf.request(tunnel + "/configurations")["config"] != expected:
+        raise ValueError("tunnel_drift")
+    record = cf.request(zone + "/dns_records/" + dns["id"])
+    if record.get("name") != HOST or record.get("content") != ref["tunnelId"] + ".cfargotunnel.com":
+        raise ValueError("dns_drift")
+    cf.request(tunnel + "/configurations", "PUT", {"config": before})
+    if cf.request(tunnel + "/configurations")["config"] != before:
+        raise ValueError("tunnel_return_mismatch")
+    cf.request(zone + "/dns_records/" + dns["id"], "DELETE")
+    cf.request(account + "/access/apps/" + app["id"], "DELETE")
+    result = {"host": HOST, "routeRemoved": True, "oldRoutesRestored": True}
+    save(root / "closed.json", result)
     return result

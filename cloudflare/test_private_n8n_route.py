@@ -1,6 +1,6 @@
 import unittest
 
-from private_n8n_route import ENTRY, HOST, PANEL, TEAM, append_console
+from private_n8n_route import ENTRY, HOST, ORIGIN, PANEL, TEAM, append_console
 
 
 class RouteTests(unittest.TestCase):
@@ -14,6 +14,7 @@ class RouteTests(unittest.TestCase):
         result = append_console(config, "console")
         self.assertEqual([row.get("hostname") for row in result["ingress"]], [PANEL, ENTRY, TEAM, HOST, None])
         self.assertEqual(result["ingress"][3]["originRequest"]["access"]["audTag"], ["console"])
+        self.assertEqual(result["ingress"][3]["service"], ORIGIN)
         self.assertEqual(config["ingress"][-1], {"service": "http_status:404"})
 
     def test_rejects_already_extended_routes(self):
