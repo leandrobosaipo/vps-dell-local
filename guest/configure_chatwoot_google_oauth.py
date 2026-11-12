@@ -18,7 +18,7 @@ import sys
 import time
 
 HOST = "equipe-jp-dell.codigo5.com.br"
-CALLBACK = f"https://{HOST}/auth/google_oauth2/callback"
+CALLBACK = f"https://{HOST}/omniauth/google_oauth2/callback"
 PROJECT = "codigo5web"
 ROOT = Path("/opt/atendimento-piloto/source")
 COMPOSE = ROOT / "compose.yaml"
