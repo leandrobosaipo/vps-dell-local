@@ -56,6 +56,7 @@ def update_env(text: str, client: dict) -> str:
         "GOOGLE_OAUTH_CLIENT_ID": client["client_id"],
         "GOOGLE_OAUTH_CLIENT_SECRET": client["client_secret"],
         "GOOGLE_OAUTH_REDIRECT_URI": CALLBACK,
+        "GOOGLE_OAUTH_CALLBACK_URL": CALLBACK,
         "ENABLE_GOOGLE_OAUTH_LOGIN": "true",
     }
     found = set()
@@ -121,6 +122,7 @@ def main() -> int:
 raise 'signup_enabled' unless ENV['ENABLE_ACCOUNT_SIGNUP'] == 'false'
 raise 'oauth_disabled' unless ENV['ENABLE_GOOGLE_OAUTH_LOGIN'] == 'true'
 raise 'callback_mismatch' unless ENV['GOOGLE_OAUTH_REDIRECT_URI'] == '%s'
+raise 'login_callback_mismatch' unless ENV['GOOGLE_OAUTH_CALLBACK_URL'] == ENV['GOOGLE_OAUTH_REDIRECT_URI']
 raise 'operator_missing' unless User.where(email: '%s').exists?
 puts 'ok'
 """ % (CALLBACK, args.operator_email)

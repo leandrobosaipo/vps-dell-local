@@ -34,6 +34,7 @@ class GoogleClientTests(unittest.TestCase):
         text = "ENABLE_ACCOUNT_SIGNUP=false\nKEEP=this\nGOOGLE_OAUTH_CLIENT_ID=old\n"
         client = {"client_id": "new", "client_secret": "secret"}
         output = update_env(text, client)
+        self.assertIn("GOOGLE_OAUTH_CALLBACK_URL=" + CALLBACK, output.splitlines())
         self.assertIn("ENABLE_ACCOUNT_SIGNUP=false", output)
         self.assertIn("KEEP=this", output)
         self.assertIn("GOOGLE_OAUTH_CLIENT_ID=new", output)
