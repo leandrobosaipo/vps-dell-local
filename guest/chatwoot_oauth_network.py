@@ -96,8 +96,15 @@ networks:
         run("docker", "compose", "up", "-d", "--no-deps", "oauth-relay")
         run("docker", "compose", "up", "-d", "--no-deps", "chat")
         for domain in ("oauth2.googleapis.com", "www.googleapis.com"):
-            run("docker", "exec", "atendimento-piloto-chat-1", "ruby", "-rnet/http", "-ruri", "-e",
-                'r=Net::HTTP.get_response(URI("https://"+ARGV[0]+"/")); abort unless (200..499).cover?(r.code.to_i)', domain)
+            for attempt in range(6):
+                try:
+                    run("docker", "exec", "atendimento-piloto-chat-1", "ruby", "-rnet/http", "-ruri", "-e",
+                        'r=Net::HTTP.get_response(URI("https://"+ARGV[0]+"/")); abort unless (200..499).cover?(r.code.to_i)', domain)
+                    break
+                except subprocess.CalledProcessError:
+                    if attempt == 5:
+                        raise
+                    time.sleep(2)
     except Exception as exc:
         if COMPOSE.read_text() == text:
             relay = run("docker", "compose", "ps", "-aq", "oauth-relay").strip()
