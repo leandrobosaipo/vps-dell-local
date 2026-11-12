@@ -41,8 +41,12 @@ def install():
     assert initial["networks"]["pilot"]["internal"] and not RELAY.exists()
     assert old.count("\n  chat:\n") == old.count("\nnetworks:\n") == 1
     routes = json.loads(run("ip", "-j", "-4", "route"))
-    assert all(not ipaddress.ip_network(x["dst"], strict=False).overlaps(SUBNET)
-               for x in routes if x.get("dst", "default") != "default")
+    matches = [x for x in routes if x.get("dst", "default") != "default"
+               and ipaddress.ip_network(x["dst"], strict=False).overlaps(SUBNET)]
+    if matches:
+        net, = json.loads(run("docker", "network", "inspect", "atendimento-piloto_oauth_private"))
+        assert net["Internal"] and not net["Containers"] and net["Labels"]["com.docker.compose.project"] == initial["name"]
+        assert len(matches) == 1 and matches[0]["dst"] == str(SUBNET) and matches[0]["dev"] == "br-" + net["Id"][:12]
     text = old.replace("\n  chat:\n", f"""
   chat:
     networks: [pilot, oauth_private]
@@ -94,8 +98,14 @@ networks:
         for domain in ("oauth2.googleapis.com", "www.googleapis.com"):
             run("docker", "exec", "atendimento-piloto-chat-1", "ruby", "-rnet/http", "-ruri", "-e",
                 'r=Net::HTTP.get_response(URI("https://"+ARGV[0]+"/")); abort unless (200..499).cover?(r.code.to_i)', domain)
-    except Exception:
+    except Exception as exc:
         if COMPOSE.read_text() == text:
+            relay = run("docker", "compose", "ps", "-aq", "oauth-relay").strip()
+            if relay:
+                diagnostic = subprocess.run(["docker", "logs", "--tail", "10", relay], capture_output=True, text=True)
+                (backup / "relay-diagnostic.txt").write_text(diagnostic.stdout + diagnostic.stderr)
+            if isinstance(exc, subprocess.CalledProcessError):
+                (backup / "check-diagnostic.txt").write_text(exc.stderr or "")
             run("docker", "compose", "rm", "--stop", "--force", "oauth-relay")
             atomic(COMPOSE, old, COMPOSE.stat().st_mode & 0o777)
             run("docker", "compose", "up", "-d", "--no-deps", "chat")
