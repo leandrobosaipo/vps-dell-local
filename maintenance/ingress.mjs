@@ -206,6 +206,7 @@ export function createHandler(configInput, hooks = {}) {
     if (req.method === 'GET' && req.url === '/healthz') {
       try {
         storageDir(config.dir);
+        if (hooks.health) return reply(res, 200, {status: 'ready', ...hooks.health()});
         const count = fs.readdirSync(config.dir).filter(name => HASH_RE.test(name.slice(0, -5)) && name.endsWith('.json')).length;
         return reply(res, 200, {status: 'ready', records: count});
       } catch { return reply(res, 503, {status: 'unavailable'}); }
@@ -227,7 +228,9 @@ export function createHandler(configInput, hooks = {}) {
       if (!instanceMatches(raw, config.instance)) return reply(res, 401, {error: 'instance_mismatch'});
     } catch { return reply(res, 400, {error: 'invalid_json'}); }
     try {
+      if (hooks.reserve) hooks.reserve(recordId(config.instance, raw));
       const result = persistRaw(config, raw, config.source === 'n8n' ? {workflowId, executionId} : null, hooks);
+      hooks.committed?.(result);
       return reply(res, 202, result);
     } catch { return reply(res, 503, {error: 'intake_unavailable'}); }
   };
