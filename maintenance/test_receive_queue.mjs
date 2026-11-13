@@ -30,6 +30,23 @@ test('the external listener serves only the two intake operations',async t=>{
   }
   assert.deepEqual(calls,['/healthz','/inbound']);
 });
+test('continuation survives a missed n8n step, retains uncertain calls and cannot cross epochs',t=>{
+  const {queue:q,config:c,raw,id,append}=setup(t);
+  const first=raw(51),second=raw(52),epoch=randomUUID();
+  q.changeOwner('',epoch);
+  for(const b of [first,second]){
+    append(b);q.claim(id(b),'51');q.finish(id(b),'51',true,'confirmed_receipt');
+  }
+  assert.deepEqual(q.readyContinuations(2),[id(first),id(second)]);
+  assert.equal(q.startContinuation(id(first),epoch,'52'),'claimed');
+  assert.throws(()=>q.startContinuation(id(first),epoch,'53'));
+  q.finishContinuation(id(first),'52','delivery_unknown');
+  assert.equal(q.startContinuation(id(first),epoch,'54'),'delivery_unknown');
+  assert.deepEqual(q.readyContinuations(2),[id(second)]);
+  q.changeOwner(epoch,'');q.changeOwner('',randomUUID());
+  assert.deepEqual(q.readyContinuations(2),[]);
+  assert.throws(()=>q.startContinuation(id(second),epoch,'55'));
+});
 test('the first observation owns eligibility across retries, cut and return',t=>{
   const {queue:q,config:c,raw,id,append}=setup(t);
   const [a,b,d,e]=[1,2,3,4].map(raw);
@@ -73,6 +90,91 @@ test('only a direct identity assigned to the current epoch goes to the chat cons
     assert.equal(res.status,200);assert.equal(calls.at(-1),ok?route.direct.url:route.core);
   }
   assert.equal(calls.length,4);
+});
+test('current owner routes unseen direct inputs, retains stale or ambiguous direct claims',async t=>{
+  const {queue:q,config:c,id,append}=setup(t),epoch=randomUUID(),token=()=>randomBytes(32).toString('hex');
+  const route={workflowId:'abcdefgh',webhook:'http://clock:5678/webhook/authorized-trigger',
+    core:'http://jp-core-transacional-dell:8791/api/n8n/inbound',coreToken:token(),processToken:token(),triggerToken:token(),
+    customer:{url:'http://172.18.0.1:19736/channel-inbound',token:token(),epoch,claimedDirect:true}};
+  assert.throws(()=>createReceiveService(c,{...route,customer:{...route.customer,fixtureOnly:true}},q));
+  const calls=[];
+  const service=http.createServer(createReceiveService(c,route,q,async (url,opt)=>{
+    calls.push(url);
+    return Response.json({ok:true,status:'retained',record_id:id(opt.body),workflow:'abcdefgh',execution:'71'});
+  }));
+  await new Promise(r=>service.listen(0,'127.0.0.1',r));t.after(()=>{service.closeAllConnections();service.close();});
+  const body=(remoteJid,fromMe=false)=>({instance:'fixture',event:'messages.upsert',data:{key:{id:'FIXTURE001',remoteJid,fromMe}}});
+  async function process(item){
+    const b=Buffer.from(JSON.stringify(item));append(b);
+    const response=await fetch('http://127.0.0.1:'+service.address().port+'/process',{method:'POST',headers:{
+      Authorization:'Bearer '+route.processToken,'X-JP-n8n-workflow-id':route.workflowId,'X-JP-n8n-execution-id':'71'},
+      body:JSON.stringify({record_id:id(b)})});
+    assert.equal(response.status,200);
+  }
+  q.changeOwner('',epoch);
+  await process(body('100000006@lid'));await process(body('5511960000001@s.whatsapp.net'));
+  await process(body('100000002@g.us'));await process([body('100000005@lid')]);
+  await process(body('100000005@lid',null));
+  q.changeOwner(epoch,'');q.changeOwner('',randomUUID());
+  await process(body('100000003@lid'));
+  assert.deepEqual(calls,[route.customer.url,route.customer.url,route.core]);
+});
+test('one authenticated claim routes only enumerated customer fixture records',async t=>{
+  const {queue:q,config:c,id,append}=setup(t),epoch=randomUUID();
+  const raw=Buffer.from(JSON.stringify({instance:'fixture',event:'messages.upsert',data:{
+    key:{id:'FIXTURE001',remoteJid:'100000001@lid',fromMe:false},message:{conversation:'Tabela fictícia'}}}));
+  const other=Buffer.from(JSON.stringify({instance:'fixture',event:'messages.upsert',data:{
+    key:{id:'FIXTURE002',remoteJid:'100000002@lid',fromMe:false},message:{conversation:'Tabela fictícia'}}}));
+  const token=()=>randomBytes(32).toString('hex');
+  const route={workflowId:'abcdefgh',webhook:'http://clock:5678/webhook/authorized-trigger',
+    core:'http://jp-core-transacional-dell:8791/api/n8n/inbound',coreToken:token(),processToken:token(),triggerToken:token(),
+    customer:{url:'http://172.18.0.1:19736/channel-inbound',token:token(),epoch,fixtureRecords:[id(raw)],fixtureOnly:true}};
+  assert.throws(()=>createReceiveService(c,{...route,customer:{...route.customer,url:'https://external.invalid'}},q));
+  const calls=[];
+  async function consume(url,opt){
+    calls.push({url,headers:opt.headers,body:opt.body});
+    return Response.json({ok:true,status:'retained',record_id:id(opt.body),workflow:'abcdefgh',execution:'70'});
+  }
+  const service=http.createServer(createReceiveService(c,route,q,consume));
+  await new Promise(r=>service.listen(0,'127.0.0.1',r));t.after(()=>{service.closeAllConnections();service.close();});
+  q.changeOwner('',epoch);append(raw);append(other);
+  const base='http://127.0.0.1:'+service.address().port;
+  for(const b of [raw,other]){
+    const res=await fetch(base+'/process',{method:'POST',headers:{Authorization:'Bearer '+route.processToken,
+      'X-JP-n8n-workflow-id':'abcdefgh','X-JP-n8n-execution-id':'70'},body:JSON.stringify({record_id:id(b)})});
+    assert.equal(res.status,200);
+  }
+  assert.equal(calls[0].url,route.customer.url);
+  assert.equal(calls[0].headers.Authorization,'Bearer '+route.customer.token);
+  assert.equal(calls[0].headers['X-JP-Owner-Epoch'],epoch);
+  assert.equal(calls[0].headers['X-JP-Record-ID'],id(raw));
+  assert.deepEqual(calls[0].body,raw);
+  assert.equal(calls.length,1);
+  assert.equal(q.status(id(raw)).state,'completed');
+  assert.equal(q.status(id(other)).state,'completed');
+});
+
+test('claimed outgoing events notify the receipt socket by journal ID once',async t=>{
+  const {queue:q,config:c,id,append}=setup(t),epoch=randomUUID();
+  const event=(native,fromMe)=>Buffer.from(JSON.stringify({instance:c.instance,event:'messages.update',data:{
+    keyId:native,fromMe,status:'DELIVERY_ACK'}}));
+  const allowed=event('fixture-allowed',true), foreign=event('fixture-foreign',true), inbound=event('fixture-inbound',false);
+  const token=()=>randomBytes(32).toString('hex');
+  const route={workflowId:'abcdefgh',webhook:'http://clock:5678/webhook/authorized-trigger',
+    core:'http://jp-core-transacional-dell:8791/api/n8n/inbound',coreToken:token(),processToken:token(),triggerToken:token(),
+    receiptObserver:{epoch,fixtureOnly:true,records:[id(allowed),id(inbound)]}};
+  const seen=[];
+  const service=http.createServer(createReceiveService(c,route,q,()=>assert.fail('fixture reached a business route'),async record=>seen.push(record)));
+  await new Promise(r=>service.listen(0,'127.0.0.1',r));t.after(()=>{service.closeAllConnections();service.close();});
+  q.changeOwner('',epoch);
+  for(const body of [allowed,foreign,inbound])append(body);
+  for(const body of [allowed,allowed,foreign,inbound]){
+    const response=await fetch('http://127.0.0.1:'+service.address().port+'/process',{method:'POST',
+      headers:{Authorization:'Bearer '+route.processToken,'X-JP-n8n-workflow-id':route.workflowId,'X-JP-n8n-execution-id':'75'},
+      body:JSON.stringify({record_id:id(body)})});
+    assert.equal(response.status,200);
+  }
+  assert.deepEqual(seen,[id(allowed)]);
 });
 test('webhook forwards references only; authentic n8n claim sends the exact bytes once',async t=>{
   const {queue:q,config:c,raw,id}=setup(t);const bytes=raw(27),rid=id(bytes);

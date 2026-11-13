@@ -37,6 +37,42 @@ function directOwner(route,tokens){
     return senders.has(createHash('sha256').update(instance).update(Buffer.from([0])).update(key.remoteJid).digest('hex'));
   }};
 }
+function customerOwner(route,tokens){
+  if(!route)return null;
+  const url=new URL(route.url);
+  assert(isIPv4(url.hostname)&&/^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(url.hostname));
+  assert.equal(url.href,'http://'+url.hostname+':19736/channel-inbound');
+  assert(typeof route.token==='string'&&route.token.length>=32&&!tokens.includes(route.token));
+  assert(/^[a-f0-9-]{36}$/.test(route.epoch));
+  const claimedDirect=route.claimedDirect===true;
+  if(claimedDirect){
+    assert(route.fixtureRecords===undefined&&route.fixtureOnly===undefined);
+  }else{
+    assert(route.claimedDirect===undefined&&Array.isArray(route.fixtureRecords)&&route.fixtureRecords.length>0&&
+      route.fixtureRecords.every(id=>typeof id==='string'&&/^[0-9a-f]{64}$/.test(id))&&
+      new Set(route.fixtureRecords).size===route.fixtureRecords.length);
+    assert(route.fixtureOnly===undefined||route.fixtureOnly===true);
+  }
+  const fixtures=new Set(route.fixtureRecords);
+  return {url:url.href,token:route.token,epoch:route.epoch,fixtureOnly:route.fixtureOnly===true,claimedDirect,
+    directInput(raw){
+      if(!claimedDirect)return false;
+      const body=JSON.parse(raw),items=Array.isArray(body)?body:[body];
+      return items.some(item=>{
+        const key=item?.data?.key;
+        return String(item?.event).toLowerCase().replaceAll('_','.')==='messages.upsert'&&
+          key?.fromMe!==true&&typeof key?.remoteJid==='string'&&/@(lid|s\.whatsapp\.net)$/.test(key.remoteJid);
+      });
+    },
+    owns:(id,epoch)=>epoch===route.epoch&&fixtures.has(id),select(raw,id,epoch,instance){
+    if(epoch!==route.epoch||(!claimedDirect&&!fixtures.has(id)))return false;
+    const body=JSON.parse(raw),key=body?.data?.key;
+    return body?.instance===instance&&String(body.event).toLowerCase().replaceAll('_','.')==='messages.upsert'&&
+      key?.fromMe===false&&typeof key.id==='string'&&/^[A-Za-z0-9_-]{6,160}$/.test(key.id)&&
+      typeof key.remoteJid==='string'&&/^\d{6,20}@(lid|s\.whatsapp\.net)$/.test(key.remoteJid)&&
+      !key.participant&&!key.participantAlt;
+  }};
+}
 async function readId(req){
   let bytes=0;const chunks=[];
   for await(const chunk of req){bytes+=chunk.length;assert(bytes<=256);chunks.push(chunk);}
@@ -44,7 +80,46 @@ async function readId(req){
   assert.deepEqual(Object.keys(body),['record_id']);assert.match(body.record_id,/^[0-9a-f]{64}$/);return body.record_id;
 }
 
-export function createReceiveService(config,route,queue,request=fetch){
+function dispatchRequest(path,input){
+  const body=JSON.stringify(input);
+  return new Promise((resolve,reject)=>{
+    const request=http.request({socketPath:'/dispatch/dispatch.sock',path,method:'POST',
+      signal:AbortSignal.timeout(path==='/resume-record'?60000:10000),headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body)}},res=>{
+      let text='';
+      res.setEncoding('utf8');
+      res.on('error',reject);
+      res.on('data',chunk=>{text+=chunk;if(text.length>1024)res.destroy(Error('receipt_response_limit'));});
+      res.on('end',()=>{
+        try{
+          assert.equal(res.statusCode,200);
+          resolve(JSON.parse(text));
+        }catch(error){reject(error);}
+      });
+    });
+    request.on('error',reject);request.end(body);
+  });
+}
+
+async function observeDispatchRecord(id){
+  const row=await dispatchRequest('/receipt-event',{record:id});
+  for(const key of ['matched','waiting','confirmed'])assert(Number.isSafeInteger(row[key])&&row[key]>=0&&row[key]<=256);
+  assert.equal(row.waiting+row.confirmed,row.matched);
+  return row;
+}
+
+function outgoingReceipt(raw, instance){
+  let body=JSON.parse(raw);
+  if(Array.isArray(body)){
+    if(body.length!==1)return false;
+    [body]=body;
+  }
+  const event=String(body?.event).toLowerCase().replaceAll('_','.');
+  if(body?.instance!==instance||!['messages.upsert','messages.update'].includes(event))return false;
+  const rows=Array.isArray(body.data)?body.data:[body.data];
+  return rows.some(row=>(row?.fromMe??row?.key?.fromMe)===true);
+}
+
+export function createReceiveService(config,route,queue,request=fetch,observe=observeDispatchRecord){
   // The incoming JSON cannot choose an upstream, a recipient or a credential.
   const workflow=new URL(route.webhook), core=new URL(route.core);
   assert.equal(workflow.origin,'http://clock:5678');
@@ -54,18 +129,31 @@ export function createReceiveService(config,route,queue,request=fetch){
   assert(new Set([route.processToken,route.triggerToken,route.coreToken,config.token]).size===4);
   for(const token of [route.processToken,route.triggerToken,route.coreToken,config.token])assert(typeof token==='string'&&token.length>=32);
   const chat=directOwner(route.direct,[route.processToken,route.triggerToken,route.coreToken,config.token]);
+  const customer=customerOwner(route.customer,[route.processToken,route.triggerToken,route.coreToken,config.token,chat?.token]);
+  assert(!(customer?.fixtureOnly||customer?.claimedDirect)||!chat);
+  const observer=route.receiptObserver;
+  if(observer){
+    assert(/^[a-f0-9-]{36}$/.test(observer.epoch)&&typeof observer.fixtureOnly==='boolean');
+    if(observer.fixtureOnly)assert(!customer&&!chat);
+    else assert(!customer?.fixtureOnly);
+    if(observer.fixtureOnly){
+      assert(Array.isArray(observer.records)&&observer.records.length>0&&observer.records.every(id=>/^[a-f0-9]{64}$/.test(id)));
+    }else assert(observer.records===undefined);
+  }
   let waking=false,recoveryCursor=0;
   async function wake(limit){
     if(waking)return 0;
     waking=true;let attempted=0;
     try{
       recoveryCursor=queue.recoverPage(recoveryCursor).next;
-      for(const id of queue.ready(limit)){
+      const ready=queue.ready(limit);
+      if(observer?.resume===true)ready.unshift(...queue.readyContinuations(limit));
+      for(const id of ready.slice(0,limit)){
         attempted++;
         // If n8n disappears before claiming, the record stays ready for the next n8n drain.
         // A claim without a final receipt stays claimed for reconciliation by that ID.
         try{
-          const res=await request(workflow.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(chat?140000:15000),
+          const res=await request(workflow.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(chat||customer?140000:15000),
             headers:{'Content-Type':'application/json',Authorization:'Bearer '+route.triggerToken},body:JSON.stringify({record_id:id})});
           await res.body?.cancel();
           if(!res.ok)break;
@@ -81,7 +169,7 @@ export function createReceiveService(config,route,queue,request=fetch){
   });
   return async(req,res)=>{
     if(req.url==='/inbound'||req.url==='/healthz')return ingress(req,res);
-    if(req.method!=='POST'||!['/process','/drain'].includes(req.url))return reply(res,404,{ok:false});
+    if(req.method!=='POST'||!['/process','/drain','/resume'].includes(req.url))return reply(res,404,{ok:false});
     if(!authorized(req.headers.authorization,route.processToken))return reply(res,401,{ok:false});
     const workflowId=req.headers['x-jp-n8n-workflow-id'],execution=req.headers['x-jp-n8n-execution-id'];
     if(typeof execution!=='string'||!/^\d{1,20}$/.test(execution))return reply(res,403,{ok:false});
@@ -91,20 +179,64 @@ export function createReceiveService(config,route,queue,request=fetch){
     }
     if(workflowId!==route.workflowId)return reply(res,403,{ok:false});
     let id;try{id=await readId(req);}catch{return reply(res,400,{ok:false});}
+    if(req.url==='/resume'){
+      if(observer?.resume!==true)return reply(res,403,{ok:false});
+      const received=queue.status(id);
+      if(received?.state!=='completed'||received.epoch!==observer.epoch||
+          queue.owner().epoch!==observer.epoch)return reply(res,409,{ok:false});
+      let outcome='no_continuation';
+      if(received.outcome===JSON.stringify('confirmed_receipt')){
+        outcome=queue.startContinuation(id,received.epoch,execution);
+        if(outcome==='claimed'){
+          try{
+            const result=await dispatchRequest('/resume-record',{record:id,workflow:workflowId,execution,epoch:received.epoch});
+            assert(['no_continuation','human','accepted','delivery_unknown'].includes(result.status));
+            outcome=result.status;
+          }catch{outcome='held';}
+          queue.finishContinuation(id,execution,outcome);
+        }
+      }
+      return reply(res,200,{ok:true,record_id:id,workflow:workflowId,execution,status:'retained',outcome});
+    }
     let claimed;try{claimed=queue.claim(id,execution);}catch{return reply(res,409,{ok:false,reason:'held'});}
-    if(claimed.state==='completed')return reply(res,200,{ok:true,duplicate:true,record_id:id,execution:claimed.execution});
+    if(claimed.state==='completed')return reply(res,200,{ok:true,duplicate:true,record_id:id,execution:claimed.execution,
+      resume_pending:observer?.resume===true&&queue.status(id).outcome===JSON.stringify('confirmed_receipt')});
     try{
-      const mapped=chat?.select(claimed.raw,claimed.epoch,config.instance);
-      const result=await request(mapped?chat.url:core.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(mapped?125000:20000),
-        headers:{'Content-Type':'application/json',Authorization:'Bearer '+(mapped?chat.token:route.coreToken),
-          ...(mapped?{'X-JP-Owner-Epoch':claimed.epoch}:{}),
+      let confirmed=false;
+      if(observer){
+        const permitted=observer.epoch===claimed.epoch&&(!observer.fixtureOnly||observer.records.includes(id));
+        const outgoing=outgoingReceipt(claimed.raw,config.instance);
+        if(outgoing&&!permitted&&!observer.fixtureOnly)throw Error('receipt_epoch_closed');
+        if(permitted&&outgoing){
+          const result=await observe(id);
+          confirmed=observer.resume===true&&result.confirmed>0;
+        }
+        if(observer.fixtureOnly){
+          queue.finish(id,execution,true,confirmed?'confirmed_receipt':'retained');
+          return reply(res,200,{ok:true,record_id:id,execution,status:'retained',resume_pending:confirmed});
+        }
+      }
+      if(customer?.fixtureOnly&&!customer.owns(id,claimed.epoch)){
+        queue.finish(id,execution,true,'retained');
+        return reply(res,200,{ok:true,record_id:id,execution,status:'retained'});
+      }
+      if((customer?.owns(id,claimed.epoch)||customer?.directInput(claimed.raw))&&
+         !customer.select(claimed.raw,id,claimed.epoch,config.instance)){
+        queue.finish(id,execution,true,'retained');
+        return reply(res,200,{ok:true,record_id:id,execution,status:'retained'});
+      }
+      const owner=chat?.select(claimed.raw,claimed.epoch,config.instance)?chat:
+        customer?.select(claimed.raw,id,claimed.epoch,config.instance)?customer:null;
+      const result=await request(owner?.url||core.href,{method:'POST',redirect:'error',signal:AbortSignal.timeout(owner?125000:20000),
+        headers:{'Content-Type':'application/json',Authorization:'Bearer '+(owner?.token||route.coreToken),
+          ...(owner?{'X-JP-Owner-Epoch':claimed.epoch}:{}),
           'X-JP-n8n-workflow-id':workflowId,'X-JP-n8n-execution-id':execution,'X-JP-Record-ID':id},
         body:claimed.raw});
       const data=await result.json();
       assert(result.ok&&data.ok===true&&data.record_id===id&&data.workflow===workflowId&&data.execution===execution);
       assert(['processed','retained'].includes(data.status));
-      queue.finish(id,execution,true,data.status);
-      return reply(res,200,{ok:true,record_id:id,execution,status:data.status});
+      queue.finish(id,execution,true,confirmed?'confirmed_receipt':data.status);
+      return reply(res,200,{ok:true,record_id:id,execution,status:data.status,resume_pending:confirmed});
     }catch{
       // Covers rejection, loss of the HTTP response and an unexpected result shape.
       // Never manufacture a second Central call for an ambiguous business outcome.
