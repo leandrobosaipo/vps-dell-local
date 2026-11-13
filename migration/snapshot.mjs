@@ -35,10 +35,13 @@ export function ledger(value) {
 export function reconcile(source, restored) {
   // Full equality includes scalar maps, nested credits, authorization fields,
   // original unknown delivery states, duplicates and array order.
-  assert.equal(canonical(restored), canonical(source), 'snapshot_semantic_mismatch');
+  // Compare bounded digests rather than retain two full canonical documents in
+  // the assertion. Large compact states failed at that comparison on Node 22.
+  const sourceCanonicalSha256 = digest(canonical(source));
+  assert.equal(digest(canonical(restored)), sourceCanonicalSha256, 'snapshot_semantic_mismatch');
   const before = ledger(source), after = ledger(restored);
   assert.deepEqual(after, before, 'snapshot_record_mismatch');
-  return {semanticEquality: true, arrayRecordsVerified: before.length, ledgerSha256: digest(canonical(before))};
+  return {semanticEquality: true, canonicalSha256: sourceCanonicalSha256, arrayRecordsVerified: before.length, ledgerSha256: digest(canonical(before))};
 }
 
 export function restore({sourceFile, targetFile, expectedHash, key, consumerFile, codec}) {
