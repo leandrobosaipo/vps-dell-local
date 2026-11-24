@@ -30,6 +30,44 @@ test('the external listener serves only the two intake operations',async t=>{
   }
   assert.deepEqual(calls,['/healthz','/inbound']);
 });
+test('durable incoming direct messages wake capture; bursts, echoes and duplicate envelopes are safe',async t=>{
+  const {queue,config}=setup(t);
+  const route={workflowId:'abcdefgh',webhook:'http://clock:5678/webhook/authorized-trigger',
+    core:'http://jp-core-transacional-dell:8791/api/n8n/inbound',replyWebhookPath:'jp-reply-events-'+randomBytes(16).toString('hex'),
+    ...Object.fromEntries(['processToken','coreToken','triggerToken'].map(k=>[k,randomBytes(32).toString('hex')]))};
+  const calls=[];
+  let release;
+  const inProgress=new Promise(resolve=>{release=resolve;});
+  const downstream=async(url,options)=>{
+    assert.equal(url,'http://clock:5678/webhook/'+route.replyWebhookPath);
+    assert.equal(options.headers.Authorization,'Bearer '+route.triggerToken);
+    assert.equal(options.body,'{}');
+    calls.push(queue.health().lastSequence);
+    if(calls.length===1)await inProgress;
+    return new Response(null,{status:200});
+  };
+  const service=http.createServer(createReceiveService(config,route,queue,downstream));
+  await new Promise(r=>service.listen(0,'127.0.0.1',r));
+  t.after(()=>{release();service.closeAllConnections();service.close();});
+  const send=body=>fetch('http://127.0.0.1:'+service.address().port+'/inbound',{
+    method:'POST',headers:{Authorization:'Bearer '+config.token},body:JSON.stringify(body)});
+  const message=(id,fromMe=false,jid='10000001@lid')=>({key:{id,fromMe,remoteJid:jid}});
+  const envelope=(data,event='MESSAGES_UPSERT')=>({instance:'fixture',event,data});
+  for(const body of [envelope(message('echo',true)),envelope(message('group',false,'10000001@g.us')),
+    envelope(message('ack'),'MESSAGES_UPDATE'),envelope(null,'CONNECTION_UPDATE')]){
+    assert.equal((await send(body)).status,202);
+  }
+  assert.equal(calls.length,0);
+  const first=envelope(message('direct'));
+  assert.equal((await send(first)).status,202);
+  assert.equal((await (await send(first)).json()).duplicate,true);
+  assert.equal((await send([envelope([message('next')])])).status,202);
+  assert.equal((await send(envelope(message('third')))).status,202);
+  assert.deepEqual(calls,[5]);
+  release();
+  await new Promise(r=>setImmediate(r));
+  assert.deepEqual(calls,[5,7]);
+});
 test('the first observation owns eligibility across retries, cut and return',t=>{
   const {queue:q,config:c,raw,id,append}=setup(t);
   const [a,b,d,e]=[1,2,3,4].map(raw);

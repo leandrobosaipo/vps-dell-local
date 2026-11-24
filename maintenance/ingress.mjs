@@ -230,7 +230,7 @@ export function createHandler(configInput, hooks = {}) {
     try {
       if (hooks.reserve) hooks.reserve(recordId(config.instance, raw));
       const result = persistRaw(config, raw, config.source === 'n8n' ? {workflowId, executionId} : null, hooks);
-      hooks.committed?.(result);
+      hooks.committed?.(result, raw);
       return reply(res, 202, result);
     } catch { return reply(res, 503, {error: 'intake_unavailable'}); }
   };

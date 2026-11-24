@@ -54,6 +54,29 @@ export function createReceiveService(config,route,queue,request=fetch){
   assert(new Set([route.processToken,route.triggerToken,route.coreToken,config.token]).size===4);
   for(const token of [route.processToken,route.triggerToken,route.coreToken,config.token])assert(typeof token==='string'&&token.length>=32);
   const chat=directOwner(route.direct,[route.processToken,route.triggerToken,route.coreToken,config.token]);
+  const replyPath=route.replyWebhookPath;
+  if(replyPath!==undefined)assert(/^jp-reply-events-[a-f0-9]{32}$/.test(replyPath));
+  let notifying=false, pending=false;
+  async function notifyCapture(){
+    pending=true;
+    if(notifying)return;
+    notifying=true;
+    try{
+      // A message arriving during a run needs another pass of the same cursor.
+      // The original n8n health tick recovers missed wakeups, including after a restart.
+      while(pending){
+        pending=false;
+        try{
+          const response=await request(new URL('/webhook/'+replyPath,workflow).href,{
+            method:'POST',redirect:'error',signal:AbortSignal.timeout(15000),
+            headers:{'Content-Type':'application/json',Authorization:'Bearer '+route.triggerToken},body:'{}'
+          });
+          await response.body?.cancel();
+          if(!response.ok)throw Error('webhook_unavailable');
+        }catch{console.warn('jp_reply_wakeup_unavailable');}
+      }
+    }finally{notifying=false;}
+  }
   let waking=false,recoveryCursor=0;
   async function wake(limit){
     if(waking)return 0;
@@ -76,7 +99,17 @@ export function createReceiveService(config,route,queue,request=fetch){
   }
   const ingress=createHandler(config,{
     reserve:id=>queue.reserve(id),
-    committed:result=>{queue.committed(result);void wake(4).catch(()=>{});},
+    committed:(result,raw)=>{
+      queue.committed(result);
+      void wake(4).catch(()=>{});
+      if(!replyPath||result.duplicate||queue.status(result.id)?.state!=='retained')return;
+      const envelopes=JSON.parse(raw);
+      const incoming=[].concat(envelopes).some(e=>
+        String(e.event).toLowerCase().replaceAll('_','.')==='messages.upsert' &&
+        [].concat(e.data??[]).some(item=>item?.key?.fromMe===false && typeof item.key.id==='string' &&
+          item.key.id.length>0 && /^\d{6,20}@(lid|s\.whatsapp\.net)$/.test(item.key.remoteJid)));
+      if(incoming)void notifyCapture();
+    },
     health:()=>queue.health(),
   });
   return async(req,res)=>{
